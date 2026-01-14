@@ -1,18 +1,28 @@
-def personalization_weight(item, pref) -> float:
-    try:
-        category_counter = pref.get("category", {})
-        season_counter = pref.get("season", {})
+# services/scoring.py
+from datetime import datetime
+from typing import Dict
 
-        category_score = category_counter.get(item.mainCategory, 0)
-        season_score = season_counter.get(item.season, 0)
 
-        max_category = max(category_counter.values(), default=1)
-        max_season = max(season_counter.values(), default=1)
+def personalization_weight(item, pref: Dict) -> float:
+    score = 0.0
+    score += pref.get("category", {}).get(item.mainCategory, 0.0) * 0.6
+    score += pref.get("season", {}).get(item.season, 0.0) * 0.25
+    score += pref.get("color", {}).get(item.color, 0.0) * 0.15
+    return score
 
-        return (
-            0.6 * (category_score / max_category) +
-            0.4 * (season_score / max_season)
-        )
-    except Exception as e:
-        print("SCORING ERROR:", e)
+
+def recently_worn_penalty(last_worn_date: str | None) -> float:
+    if not last_worn_date:
         return 0.0
+    try:
+        worn = datetime.strptime(last_worn_date, "%Y-%m-%d")
+        days = (datetime.now() - worn).days
+        if days <= 1:
+            return -0.6
+        if days <= 3:
+            return -0.3
+        if days <= 7:
+            return -0.15
+    except Exception:
+        pass
+    return 0.0
