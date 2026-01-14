@@ -1,0 +1,13 @@
+{
+  "userId": "test_user",
+  "lat": 37.5,
+  "lon": 127.0,
+  "clothes": [
+    {
+      "id": "c1",
+      "mainCategory": "TOP",
+      "season": "WINTER",
+      "color": "BLACK"
+    }
+  ]
+}
