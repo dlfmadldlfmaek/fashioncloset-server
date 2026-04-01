@@ -1,25 +1,55 @@
 # schemas/request.py
-from pydantic import BaseModel
+from __future__ import annotations
+
 from typing import List, Optional
+
+from pydantic import BaseModel, Field, ConfigDict
+from pydantic.aliases import AliasChoices
 
 
 class ClothesItem(BaseModel):
-    id: str
-    mainCategory: str
-    season: str
-    color: str
+    """
+    lastWornAt: unix epoch seconds (or ms). Server should normalize if mixed.
+    """
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
-    # 앱에서 넘어오는 선택 필드
-    lastWornDate: Optional[str] = None
+    id: str
+
+    category: str = Field(
+        default="TOP",
+        validation_alias=AliasChoices("category", "mainCategory"),
+    )
+
+    tags: List[str] = Field(default_factory=list)
+
+    season: Optional[str] = None
+    color: Optional[str] = None
+    thickness: Optional[str] = None  # was "THIN"
+
+    lastWornAt: Optional[int] = Field(
+        default=None,
+        validation_alias=AliasChoices("lastWornAt", "lastWornDate"),
+    )
+
     imageUrl: Optional[str] = None
 
 
 class RecommendRequest(BaseModel):
-    userId: str
-    lat: float
-    lon: float
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
-    # 없어도 안전
+    userId: str = Field(..., min_length=1)
+    lat: float = Field(default=0.0, ge=-90, le=90)
+    lon: float = Field(default=0.0, ge=-180, le=180)
+    temp: Optional[float] = Field(default=None, description="Temperature in Celsius. If provided, skips weather API.")
     style: Optional[str] = None
-
     clothes: List[ClothesItem]
+
+
+class LikeRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    userId: str
+    id: str
+    mainCategory: str
+    tags: List[str] = Field(default_factory=list)
+    liked: bool = True

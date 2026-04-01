@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+service_key.txt
+.env
+.env.*
+req.json
+request.json
+*.txt.bak

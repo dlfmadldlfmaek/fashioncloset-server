@@ -1,28 +1,141 @@
 # services/embedding.py
+from __future__ import annotations
+
+import os
+import threading
+from typing import Iterable, List, Optional
+
 import torch
 import clip
-from PIL import Image
-
-device = "cpu"
-_model = None
-_preprocess = None
+from PIL import Image, UnidentifiedImageError
 
 
-def _load_model():
-    global _model, _preprocess
-    if _model is None:
-        _model, _preprocess = clip.load("ViT-B/32", device=device)
-    return _model, _preprocess
+_DEVICE: Optional[torch.device] = None
+_MODEL = None
+_PREPROCESS = None
+_LOAD_LOCK = threading.Lock()
 
 
-def encode_image(image_path: str) -> list:
-    model, preprocess = _load_model()
+def get_device(prefer: Optional[str] = None) -> torch.device:
+    """
+    Resolve torch device.
 
-    image = Image.open(image_path).convert("RGB")
-    image_input = preprocess(image).unsqueeze(0).to(device)
+    prefer:
+      - "cpu" / "cuda" / "mps" (if available)
+      - None -> auto
+    """
+    global _DEVICE
+    if _DEVICE is not None and prefer is None:
+        return _DEVICE
 
-    with torch.no_grad():
-        embedding = model.encode_image(image_input)
-        embedding = embedding / embedding.norm(dim=-1, keepdim=True)
+    if prefer:
+        d = prefer.lower()
+        if d == "cuda" and torch.cuda.is_available():
+            _DEVICE = torch.device("cuda")
+        elif d == "mps" and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            _DEVICE = torch.device("mps")
+        else:
+            _DEVICE = torch.device("cpu")
+        return _DEVICE
 
-    return embedding[0].cpu().tolist()
+    if torch.cuda.is_available():
+        _DEVICE = torch.device("cuda")
+    elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        _DEVICE = torch.device("mps")
+    else:
+        _DEVICE = torch.device("cpu")
+    return _DEVICE
+
+
+def _load_model(*, device: Optional[torch.device] = None, model_name: str = "ViT-B/32"):
+    """
+    Lazily load CLIP model once per process.
+
+    Why: avoid repeated heavyweight loads + be thread-safe under FastAPI concurrency.
+    """
+    global _MODEL, _PREPROCESS
+
+    if _MODEL is not None and _PREPROCESS is not None:
+        return _MODEL, _PREPROCESS
+
+    with _LOAD_LOCK:
+        if _MODEL is None or _PREPROCESS is None:
+            dev = device or get_device()
+            model, preprocess = clip.load(model_name, device=dev)
+            model.eval()
+            _MODEL, _PREPROCESS = model, preprocess
+
+    return _MODEL, _PREPROCESS
+
+
+def encode_image(image_path: str, *, device: Optional[str] = None) -> List[float]:
+    """
+    Encode a single image into a normalized CLIP embedding.
+
+    Returns:
+      List[float] length depends on model (ViT-B/32 -> 512).
+    """
+    if not image_path or not isinstance(image_path, str):
+        raise ValueError("image_path must be a non-empty string")
+
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"image not found: {image_path}")
+
+    dev = get_device(device)
+    model, preprocess = _load_model(device=dev)
+
+    try:
+        with Image.open(image_path) as img:
+            image = img.convert("RGB")
+    except UnidentifiedImageError as e:
+        raise ValueError(f"invalid image file: {image_path}") from e
+
+    image_input = preprocess(image).unsqueeze(0).to(dev)
+
+    with torch.inference_mode():
+        emb = model.encode_image(image_input)
+        emb = emb / emb.norm(dim=-1, keepdim=True)
+
+    return emb[0].detach().cpu().tolist()
+
+
+def encode_images(
+    image_paths: Iterable[str],
+    *,
+    device: Optional[str] = None,
+    batch_size: int = 32,
+) -> List[List[float]]:
+    """
+    Encode multiple images in batches for higher throughput.
+    """
+    paths = list(image_paths or [])
+    if not paths:
+        return []
+
+    dev = get_device(device)
+    model, preprocess = _load_model(device=dev)
+
+    out: List[List[float]] = []
+    i = 0
+    while i < len(paths):
+        batch_paths = paths[i : i + batch_size]
+        images = []
+        for p in batch_paths:
+            if not os.path.exists(p):
+                raise FileNotFoundError(f"image not found: {p}")
+            try:
+                with Image.open(p) as img:
+                    images.append(preprocess(img.convert("RGB")))
+            except UnidentifiedImageError as e:
+                raise ValueError(f"invalid image file: {p}") from e
+
+        image_input = torch.stack(images, dim=0).to(dev)
+
+        with torch.inference_mode():
+            emb = model.encode_image(image_input)
+            emb = emb / emb.norm(dim=-1, keepdim=True)
+
+        out.extend(emb.detach().cpu().tolist())
+        i += batch_size
+
+    return out

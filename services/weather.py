@@ -1,43 +1,165 @@
 # services/weather.py
-import datetime
-import requests
-from functools import lru_cache
+from __future__ import annotations
 
-# ⚠️ import 시 네트워크 호출 절대 없음
+import datetime as dt
+import os
+import time
+from functools import lru_cache
+from typing import Any, Dict, List, Tuple
+
+import requests
+from zoneinfo import ZoneInfo
 
 BASE_URL = (
     "https://apihub.kma.go.kr/api/typ02/openApi/"
     "VilageFcstInfoService_2.0/getUltraSrtNcst"
 )
 
+_KST = ZoneInfo("Asia/Seoul")
 
-def _base_datetime():
-    """
-    기상청 규칙에 맞는 base_date / base_time 계산
-    """
-    now = datetime.datetime.now()
-    minute = 0 if now.minute < 30 else 30
-    base_time = f"{now.hour:02d}{minute:02d}"
-    base_date = now.strftime("%Y%m%d")
+_TOTAL_BUDGET_SEC = 2.5
+_REQ_TIMEOUT = (1.2, 1.2)
+
+# transient 에러에 대해서만 짧게 재시도
+_RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
+
+
+def _now_kst() -> dt.datetime:
+    return dt.datetime.now(tz=_KST)
+
+
+def _to_30min_slot(t: dt.datetime) -> Tuple[str, str]:
+    minute = 30 if t.minute >= 30 else 0
+    base_time = f"{t.hour:02d}{minute:02d}"
+    base_date = t.strftime("%Y%m%d")
     return base_date, base_time
 
 
-@lru_cache(maxsize=32)
-def _fetch_weather(nx: int, ny: int, cache_key: str):
+def _candidate_base_times(now: dt.datetime, tries: int = 3) -> List[Tuple[str, str]]:
     """
-    ⚠️ 실제 외부 API 호출
-    이 함수는 요청 시점에만 호출됨
+    발표 지연을 고려해 now-10min 기준으로 30분씩 뒤로.
     """
-    import os
+    out: List[Tuple[str, str]] = []
+    t = now - dt.timedelta(minutes=10)
 
-    service_key = os.getenv("SERVICE_KEY")
-    if not service_key:
+    for _ in range(max(1, tries)):
+        pair = _to_30min_slot(t)
+        if pair not in out:
+            out.append(pair)
+        t -= dt.timedelta(minutes=30)
+
+    return out
+
+
+def _parse_kma_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    items = payload["response"]["body"]["items"]["item"]
+
+    temp: float | None = None
+    wind: float = 0.0
+    pty_code: str = "0"
+
+    for it in items:
+        cat = str(it.get("category", "")).strip()
+        val = it.get("obsrValue")
+        if cat == "T1H":
+            try:
+                temp = float(val)
+            except Exception:
+                temp = None
+        elif cat == "WSD":
+            try:
+                wind = float(val)
+            except Exception:
+                wind = 0.0
+        elif cat == "PTY":
+            pty_code = str(val).strip()
+
+    if temp is None:
+        raise RuntimeError("Temperature(T1H) not found from KMA response")
+
+    if pty_code in ("1", "2", "4"):
+        pty = "RAIN"
+    elif pty_code == "3":
+        pty = "SNOW"
+    else:
+        pty = "SUNNY"
+
+    return {
+        "temp": round(temp, 1),
+        "feelsLike": round(temp, 1),
+        "wind": round(wind, 1),
+        "pty": pty,
+    }
+
+
+def _get_service_key() -> str:
+    """
+    PowerShell/Secret 업로드 시 CRLF가 섞이면 authKey=...%0D%0A 로 나가 401이 발생함.
+    """
+    key = (os.getenv("SERVICE_KEY") or "").strip()
+    if not key:
         raise RuntimeError("SERVICE_KEY not set")
 
-    base_date, base_time = _base_datetime()
+    # strip 후에도 공백이 남아있으면(중간 공백/개행 등) 키 자체가 오염된 것
+    if any(ch.isspace() for ch in key):
+        raise RuntimeError("SERVICE_KEY contains whitespace; fix Secret/Env value")
 
+    return key
+
+
+def _is_retryable_http(err: requests.HTTPError) -> bool:
+    resp = err.response
+    if resp is None:
+        return True
+    return int(resp.status_code) in _RETRYABLE_STATUS
+
+
+def _request_kma(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    1회 요청에 대해 아주 짧게 1번만 재시도(총 2회).
+    401/403은 즉시 실패(키 문제).
+    """
+    last_err: Exception | None = None
+
+    for attempt in range(2):
+        try:
+            res = requests.get(BASE_URL, params=params, timeout=_REQ_TIMEOUT)
+            res.raise_for_status()
+            return res.json()
+
+        except requests.HTTPError as e:
+            status = int(e.response.status_code) if e.response is not None else -1
+            # 인증 문제는 재시도해도 해결 안 됨
+            if status in (401, 403):
+                raise RuntimeError(
+                    f"KMA unauthorized (status={status}). "
+                    "SERVICE_KEY(개행/공백 포함 여부)와 권한을 확인하세요."
+                ) from e
+
+            if attempt == 0 and _is_retryable_http(e):
+                last_err = e
+                time.sleep(0.15)
+                continue
+            raise
+
+        except (requests.Timeout, requests.ConnectionError) as e:
+            if attempt == 0:
+                last_err = e
+                time.sleep(0.15)
+                continue
+            raise
+
+        except Exception as e:
+            last_err = e
+            raise
+
+    raise RuntimeError(f"KMA request failed: {last_err}")
+
+
+@lru_cache(maxsize=256)
+def _fetch_weather(nx: int, ny: int, base_date: str, base_time: str) -> Dict[str, Any]:
     params = {
-        "authKey": service_key,
+        "authKey": _get_service_key(),
         "pageNo": 1,
         "numOfRows": 100,
         "dataType": "JSON",
@@ -47,57 +169,31 @@ def _fetch_weather(nx: int, ny: int, cache_key: str):
         "ny": ny,
     }
 
-    res = requests.get(BASE_URL, params=params, timeout=5)
-    res.raise_for_status()
-
-    items = res.json()["response"]["body"]["items"]["item"]
-
-    temp = None
-    wind = 0.0
-    pty = "SUNNY"
-
-    for it in items:
-        if it["category"] == "T1H":
-            temp = float(it["obsrValue"])
-        elif it["category"] == "WSD":
-            wind = float(it["obsrValue"])
-        elif it["category"] == "PTY" and it["obsrValue"] != "0":
-            pty = "RAIN"
-
-    if temp is None:
-        raise RuntimeError("Temperature not found")
-
-    return {
-        "temp": round(temp, 1),
-        "feelsLike": round(temp, 1),  # 단순화 (체감온도 공식은 이후)
-        "wind": round(wind, 1),
-        "pty": pty,
-    }
+    payload = _request_kma(params)
+    return _parse_kma_payload(payload)
 
 
-def get_current_weather(lat: float, lon: float):
-    """
-    🔥 외부에서 호출하는 유일한 함수
-    어떤 상황에서도 Exception을 밖으로 던지지 않는다.
-    """
-    try:
-        # 🔥 grid 계산은 여기서 import (안전)
-        from services.grid import latlon_to_grid
+def get_current_weather(lat: float, lon: float) -> Dict[str, Any]:
+    from services.geo import latlon_to_grid
 
-        nx, ny = latlon_to_grid(lat, lon)
+    nx, ny = latlon_to_grid(lat, lon)
 
-        now = datetime.datetime.now()
-        cache_key = now.strftime("%Y%m%d%H") + (
-            "0" if now.minute < 30 else "5"
-        )
+    start = time.monotonic()
+    now = _now_kst()
+    candidates = _candidate_base_times(now, tries=3)
 
-        return _fetch_weather(nx, ny, cache_key)
+    last_err: Exception | None = None
 
-    except Exception:
-        # 실패해도 서버는 살아야 함
-        return {
-            "temp": 0.0,
-            "feelsLike": 0.0,
-            "wind": 0.0,
-            "pty": "SUNNY",
-        }
+    for base_date, base_time in candidates:
+        if (time.monotonic() - start) > _TOTAL_BUDGET_SEC:
+            break
+
+        try:
+            return _fetch_weather(nx, ny, base_date, base_time)
+        except Exception as e:
+            last_err = e
+            continue
+
+    raise RuntimeError(
+        f"KMA weather fetch failed (budget={_TOTAL_BUDGET_SEC}s, tried={len(candidates)}): {last_err}"
+    )
