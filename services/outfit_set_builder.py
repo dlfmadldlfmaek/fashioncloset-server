@@ -458,6 +458,80 @@ def _pair_quality_score(
 
 
 # -----------------------
+# 체형별 코디 보너스
+# -----------------------
+_BODY_TYPE_TAG_BONUS: Dict[str, Dict[str, float]] = {
+    "하체비만": {
+        # 좋은 아이템: A라인, 와이드팬츠, 상의 포인트
+        "pos": {"A라인", "플레어", "와이드", "부츠컷", "미디", "롱스커트", "하이웨이스트"},
+        "neg": {"스키니", "타이트", "레깅스", "숏팬츠", "핫팬츠", "미니스커트"},
+    },
+    "상체비만": {
+        "pos": {"V넥", "브이넥", "랩", "세로줄", "스트라이프", "어두운", "블랙상의"},
+        "neg": {"퍼프", "벌룬", "패드숄더", "터틀넥", "하이넥", "프릴", "러플"},
+    },
+    "통통체형": {
+        "pos": {"세로라인", "스트레이트", "슬림핏", "허리마크", "하이웨이스트", "모노톤"},
+        "neg": {"오버사이즈", "박시", "가로줄", "보더", "볼륨", "프릴"},
+    },
+    "마른체형": {
+        "pos": {"레이어드", "오버사이즈", "볼륨", "프릴", "러플", "패딩", "퍼프"},
+        "neg": {"슬림핏", "스키니", "타이트"},
+    },
+    "역삼각형": {
+        "pos": {"와이드팬츠", "A라인", "플레어", "카고", "볼륨하의", "밝은하의"},
+        "neg": {"패드숄더", "퍼프소매", "보트넥", "오프숄더"},
+    },
+    "골반넓음": {
+        "pos": {"스트레이트", "부츠컷", "A라인", "롱아우터", "하이웨이스트"},
+        "neg": {"스키니", "타이트", "핫팬츠", "힙라인"},
+    },
+    "골반좁음": {
+        "pos": {"카고", "와이드", "플리츠", "주름", "포켓디테일", "배기"},
+        "neg": {"스트레이트", "슬림핏"},
+    },
+    "어깨좁음": {
+        "pos": {"패드숄더", "퍼프소매", "보트넥", "오프숄더", "스퀘어넥", "숄더패드"},
+        "neg": {"래글런", "드롭숄더", "나시", "슬리브리스"},
+    },
+}
+
+
+def _body_type_bonus(items: List[Dict[str, Any]], body_type: Optional[str]) -> Tuple[float, Dict[str, Any]]:
+    bt = (body_type or "").strip()
+    if not bt or bt == "균형체형" or bt not in _BODY_TYPE_TAG_BONUS:
+        return 0.0, {"bodyType": bt, "pos": 0, "neg": 0, "bonus": 0.0}
+
+    rules = _BODY_TYPE_TAG_BONUS[bt]
+    pos_tags = rules.get("pos", set())
+    neg_tags = rules.get("neg", set())
+
+    all_tags: List[str] = []
+    for it in items:
+        all_tags.extend(it.get("tags") or [])
+
+    pos = _count_hits(all_tags, pos_tags)
+    neg = _count_hits(all_tags, neg_tags)
+
+    bonus = 0.0
+    if pos >= 3:
+        bonus += 4.0
+    elif pos >= 2:
+        bonus += 2.5
+    elif pos >= 1:
+        bonus += 1.0
+
+    if neg >= 3:
+        bonus -= 5.0
+    elif neg >= 2:
+        bonus -= 3.0
+    elif neg >= 1:
+        bonus -= 1.5
+
+    return bonus, {"bodyType": bt, "pos": pos, "neg": neg, "bonus": round(bonus, 2)}
+
+
+# -----------------------
 # Main
 # -----------------------
 def build_outfit_sets(
@@ -478,6 +552,7 @@ def build_outfit_sets(
     tag_weight: float = 1.0,
     # ✅ 조합 품질 점수 가중치
     quality_weight: float = 1.0,
+    body_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
 
     if not scored_items:
@@ -574,7 +649,10 @@ def build_outfit_sets(
         q_bonus, q_dbg = _pair_quality_score(items, weather_temp=temp_f, need_outer=need_outer)
         q_bonus_scaled = float(q_bonus) * float(quality_weight)
 
-        score = float(base) + float(w_bonus) + float(s_bonus_total) + float(q_bonus_scaled)
+        # ✅ 체형 보너스
+        bt_bonus, bt_dbg = _body_type_bonus(items, body_type)
+
+        score = float(base) + float(w_bonus) + float(s_bonus_total) + float(q_bonus_scaled) + float(bt_bonus)
         score = max(0.0, score)
 
         if _min_outfit and score < float(_min_outfit):
@@ -593,6 +671,7 @@ def build_outfit_sets(
                 "weatherBonus": round(float(w_bonus), 3),
                 "style": dbg_style,
                 "quality": {**q_dbg, "scaled": round(q_bonus_scaled, 3), "weight": float(quality_weight)},
+                "bodyType": bt_dbg,
                 "minOutfit": float(_min_outfit),
                 "includeStyle": bool(_include_style),
                 "includeWeather": bool(_include_weather),

@@ -644,6 +644,14 @@ def recommend_outfits(
 
     scored = _score_items_raw(req, weather, style_ctx_override=effective_style)
 
+    # 기존 코디 제외 요청 시, 스코어에 랜덤 노이즈를 추가하여 다른 조합 생성
+    if req.excludeItemSets:
+        rng = np.random.default_rng()
+        for item in scored:
+            noise = rng.uniform(-3.0, 3.0)
+            item["finalScore"] = max(0.0, float(item.get("finalScore", 0.0)) + noise)
+        scored.sort(key=lambda x: x["finalScore"], reverse=True)
+
     scored_outfit = [
         x for x in scored
         if (x.get("mainCategory") or x.get("category")) in {"TOP", "BOTTOM", "OUTER"}
@@ -679,18 +687,33 @@ def recommend_outfits(
         counts, base_ref, base_floor, final_floor, min_base_score, min_outfit_score
     )
 
+    # excludeItemSets가 있으면 더 많이 생성해서 제외 후 잘라냄
+    exclude_sigs: set = set()
+    if req.excludeItemSets:
+        exclude_sigs = {"|".join(sorted(ids)) for ids in req.excludeItemSets}
+
+    gen_max = effective_max_sets + len(exclude_sigs) * 2 if exclude_sigs else effective_max_sets
+
     outfits_raw = build_outfit_sets(
         scored_outfit,
         weather={"temp": weather.temp, "pty": weather.pty},
         style=effective_style,
-        max_sets=effective_max_sets,
+        max_sets=gen_max,
         min_base_score=min_base_score,
         min_outfit_score=min_outfit_score,
         threshold_include_style=policy.include_style_in_threshold,
         threshold_include_weather=policy.include_weather_in_threshold,
         allow_singles=policy.allow_singles,
         min_sets=3,
+        body_type=req.bodyType,
     )
+
+    if exclude_sigs:
+        outfits_raw = [
+            o for o in outfits_raw
+            if "|".join(sorted(str(it.get("id")) for it in (o.get("items") or []) if it and it.get("id")))
+            not in exclude_sigs
+        ]
 
     logger.info("[OUTFITS] produced=%d lens=%s", len(outfits_raw), [len(o.get("items", [])) for o in outfits_raw])
 
@@ -710,15 +733,25 @@ def recommend_outfits(
             scored_outfit,
             weather={"temp": weather.temp, "pty": weather.pty},
             style=effective_style,
-            max_sets=effective_max_sets,
+            max_sets=gen_max,
             min_base_score=relaxed_min_base,
             min_outfit_score=relaxed_min_outfit,
             threshold_include_style=False,
             threshold_include_weather=True,
             allow_singles=True,
+            body_type=req.bodyType,
         )
 
+        if exclude_sigs:
+            outfits_raw = [
+                o for o in outfits_raw
+                if "|".join(sorted(str(it.get("id")) for it in (o.get("items") or []) if it and it.get("id")))
+                not in exclude_sigs
+            ]
+
         logger.info("[OUTFITS] fallback produced=%d", len(outfits_raw))
+
+    outfits_raw = outfits_raw[:effective_max_sets]
 
     # ✅ style anchors 준비 (현재 style_encoder 구현 기준)
     # - 텍스트+이미지 앵커를 쓰려면 style_encoder를 "anchors.json 로드" 방식으로 바꾸면

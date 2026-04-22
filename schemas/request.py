@@ -43,6 +43,14 @@ class RecommendRequest(BaseModel):
     temp: Optional[float] = Field(default=None, description="Temperature in Celsius. If provided, skips weather API.")
     style: Optional[str] = None
     clothes: List[ClothesItem]
+    excludeItemSets: Optional[List[List[str]]] = Field(
+        default=None,
+        description="List of item-id sets to exclude from outfit results (e.g. [['id1','id2'], ['id3','id4']])",
+    )
+    bodyType: Optional[str] = Field(
+        default=None,
+        description="User body type for personalized recommendations",
+    )
 
 
 class LikeRequest(BaseModel):
