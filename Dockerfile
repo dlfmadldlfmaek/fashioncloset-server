@@ -18,12 +18,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
       torch==2.2.2+cpu torchvision==0.17.2+cpu && \
     pip install --no-cache-dir -r requirements.txt
 
-# Phase 1: FashionCLIP 모델 사전 다운로드 (cold start 최적화)
-RUN python -c "from transformers import CLIPModel, CLIPProcessor; \
-    CLIPProcessor.from_pretrained('patrickjohncyh/fashion-clip'); \
-    CLIPModel.from_pretrained('patrickjohncyh/fashion-clip'); \
-    print('FashionCLIP model downloaded')"
-
 COPY . .
 
 RUN useradd -m appuser && chown -R appuser:appuser /app
