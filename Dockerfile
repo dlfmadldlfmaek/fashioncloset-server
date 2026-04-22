@@ -13,9 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 
+# torch CPU only (torchvision 제거 — FashionCLIP은 transformers processor 사용)
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
-      torch==2.2.2+cpu torchvision==0.17.2+cpu && \
+      torch==2.2.2+cpu && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY . .
