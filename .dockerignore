@@ -13,3 +13,7 @@ test_*.py
 *.md
 scripts/
 tools/
+.claude/
+notebooks/
+*.ipynb
+*.lnk
