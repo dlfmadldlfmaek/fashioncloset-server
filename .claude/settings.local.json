@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where git:*)",
+      "Bash(git:*)",
+      "Bash(cmd.exe:*)",
+      "Bash(/c/Windows/System32/cmd.exe:*)",
+      "Bash(powershell.exe:*)",
+      "Bash(/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe:*)"
+    ]
+  }
+}

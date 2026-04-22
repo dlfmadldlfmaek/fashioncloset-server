@@ -18,6 +18,7 @@ from schemas.response import (
     WeatherResponse,
 )
 from services.diversify import diversify
+from services.learning import get_learning_weights
 from services.outfit_encoder import encode_outfit_image_from_url
 from services.outfit_set_builder import build_outfit_sets
 from services.premium import is_premium_user
@@ -30,6 +31,7 @@ from services.recommend_cache import (
 from services.recommendation import apply_time_score, get_current_style_context
 from services.scoring import personalization_weight, recently_worn_penalty
 from services.style_encoder import calc_style_similarity, load_style_anchors
+from services.style_vector import get_user_style_vector
 from services.user_service import load_user_preference
 from services.weather import get_current_weather
 
@@ -38,7 +40,6 @@ logger = logging.getLogger("recommend")
 
 
 def _build_weather(req) -> WeatherResponse:
-    """Build WeatherResponse from request temp, or fallback to weather API."""
     if req.temp is not None:
         return WeatherResponse(temp=float(req.temp), feelsLike=float(req.temp), wind=0, pty="SUNNY")
     try:
@@ -53,12 +54,15 @@ def _build_weather(req) -> WeatherResponse:
         logger.warning("[WEATHER FAIL] %s", e)
         return WeatherResponse(temp=20.0, feelsLike=20.0, wind=0, pty="SUNNY")
 
+
 # -----------------------
-# Style list (base + beta)
+# Style list (base + expanded + beta)
 # -----------------------
 BASE_STYLES = ["casual", "formal", "minimal", "street", "vintage"]
+# Phase 1: 확장 스타일
+EXPANDED_STYLES = ["gorpcore", "workwear", "preppy", "romantic", "sporty"]
+ALL_STYLES = BASE_STYLES + EXPANDED_STYLES
 
-# ✅ 베타 스타일: "프리미엄만 실제로 선택 가능"
 BETA_STYLES = [
     "workwear_beta",
     "gorpcore_beta",
@@ -73,7 +77,6 @@ PREMIUM_DEFAULT_MAX_SETS = 6
 FREE_DEFAULT_MAX_SETS = 3
 PREMIUM_HARD_CAP_MAX_SETS = 30
 
-# 추천 리스트(단품 추천)에서 TOP/BOTTOM 최소 보장
 RECOMMEND_TOTAL = 10
 RECOMMEND_MIN_TOP = 3
 RECOMMEND_MIN_BOTTOM = 3
@@ -88,11 +91,6 @@ def _is_beta_style(style: Optional[str]) -> bool:
 
 
 def _enforce_style_for_user(style: Optional[str], premium: bool) -> str:
-    """
-    ✅ 서버에서 베타 스타일 접근을 강제.
-    - premium이면 그대로 사용
-    - 무료면 beta 요청 시 기본 스타일(casual)로 강제 fallback
-    """
     s = (style or "").strip().lower()
     if not s:
         return "casual"
@@ -100,11 +98,17 @@ def _enforce_style_for_user(style: Optional[str], premium: bool) -> str:
     if _is_beta_style(s) and (not premium):
         return "casual"
 
-    # base style이 아닌 값이 와도 최소한 깨지지 않게 default 처리
-    if (s not in BASE_STYLES) and (not _is_beta_style(s)):
+    if (s not in ALL_STYLES) and (not _is_beta_style(s)):
         return "casual"
 
     return s
+
+
+def _enforce_styles_for_user(styles: Optional[List[str]], premium: bool) -> List[str]:
+    """Phase 5: 멀티스타일 검증."""
+    if not styles:
+        return []
+    return [_enforce_style_for_user(s, premium) for s in styles]
 
 
 # -----------------------
@@ -132,7 +136,6 @@ def normalize_category(raw: str) -> str:
     if s in {"ACC", "ACCESSORY", "액세서리", "악세서리", "HAT", "CAP", "BELT", "SCARF", "MUFFLER", "SUNGLASSES", "WATCH"}:
         return "ACC"
 
-    # fuzzy
     if ("BOTTOM" in s) or ("PANT" in s) or ("JEAN" in s) or ("SKIRT" in s) or ("하의" in s) or ("바지" in s):
         return "BOTTOM"
     if ("OUTER" in s) or ("COAT" in s) or ("JACKET" in s) or ("패딩" in s) or ("아우터" in s):
@@ -186,7 +189,6 @@ def calculate_weather_match(item, weather: WeatherResponse) -> float:
     cat = normalize_category(getattr(item, "category", None) or "TOP")
     tags = getattr(item, "tags", None) or []
 
-    # 5단계 온도대별 두께 매칭
     if temp <= 0:
         if thick in ["THICK", "PADDING", "HEAVY"]:
             score += 12
@@ -215,13 +217,12 @@ def calculate_weather_match(item, weather: WeatherResponse) -> float:
             score += 2
         elif thick in ["THICK", "PADDING"]:
             score -= 15
-    else:  # 28도 이상
+    else:
         if thick in ["THIN", "SHEER", "LIGHT"]:
             score += 10
         elif thick in ["THICK", "PADDING"]:
             score -= 20
 
-    # 시즌 보너스 (더 세분화)
     if temp <= 5 and season in {"WINTER"}:
         score += 6
     elif temp <= 12 and season in {"WINTER", "FALL", "AUTUMN"}:
@@ -231,7 +232,6 @@ def calculate_weather_match(item, weather: WeatherResponse) -> float:
     elif temp >= 20 and season in {"SUMMER", "SPRING"}:
         score += 5
 
-    # 명확한 시즌 미스매치
     if temp >= 25 and season == "WINTER":
         score -= 8
     elif temp <= 5 and season == "SUMMER":
@@ -240,7 +240,6 @@ def calculate_weather_match(item, weather: WeatherResponse) -> float:
     if weather.pty in ["RAIN", "SNOW"]:
         if cat == "BOTTOM" and any(str(t).strip().upper() == "LONG" for t in tags):
             score -= 2
-        # 아우터 보너스
         if cat == "OUTER":
             score += 3
 
@@ -298,7 +297,7 @@ def _adaptive_floor(ref: float, hard_floor: float, soft_floor: float) -> float:
 
 
 # -----------------------
-# helpers (style score on OutfitSet) ✅ NEW
+# helpers (style score on OutfitSet)
 # -----------------------
 def _safe_vec(x: object) -> Optional[np.ndarray]:
     try:
@@ -316,10 +315,6 @@ def _l2norm(v: np.ndarray) -> np.ndarray:
 
 
 def _outfit_embedding_from_items(items: List[dict]) -> Optional[np.ndarray]:
-    """
-    세트 이미지가 없으니, 세트 내 아이템 imageUrl들의 CLIP 임베딩 평균으로
-    'outfit vector'를 근사합니다.
-    """
     vecs: List[np.ndarray] = []
     dim: Optional[int] = None
 
@@ -351,9 +346,6 @@ def _outfit_embedding_from_items(items: List[dict]) -> Optional[np.ndarray]:
 
 
 def _sim_to_score(sim: float) -> float:
-    """
-    cosine similarity (-1~1)를 UI용 0~100으로 변환
-    """
     s = float(sim)
     if s < -1.0:
         s = -1.0
@@ -363,13 +355,50 @@ def _sim_to_score(sim: float) -> float:
 
 
 # -----------------------
+# Phase 3: 앵커 + 유저 스타일 벡터 혼합
+# -----------------------
+def _get_mixed_anchor(
+    style_key: str,
+    user_id: str,
+    anchors: Dict[str, np.ndarray],
+    *,
+    global_weight: float = 0.5,
+) -> Optional[np.ndarray]:
+    """글로벌 앵커 0.5 + 개인 벡터 0.5 혼합."""
+    global_anchor = anchors.get(style_key)
+
+    user_vec = None
+    try:
+        user_vec = get_user_style_vector(user_id, style_key)
+    except Exception:
+        pass
+
+    if global_anchor is None and user_vec is None:
+        return None
+    if global_anchor is not None and user_vec is None:
+        return global_anchor
+    if global_anchor is None and user_vec is not None:
+        return _l2norm(user_vec)
+
+    # 둘 다 있으면 가중 평균
+    ga = _safe_vec(global_anchor)
+    uv = _safe_vec(user_vec)
+    if ga is None:
+        return _l2norm(uv) if uv is not None else None
+    if uv is None:
+        return ga
+
+    if ga.shape[0] != uv.shape[0]:
+        return ga
+
+    mixed = global_weight * ga + (1.0 - global_weight) * uv
+    return _l2norm(mixed)
+
+
+# -----------------------
 # Scoring (items)
 # -----------------------
 def _clip_style_score(image_url: str, style_key: str, anchors: dict) -> Tuple[float, Optional[list]]:
-    """
-    개별 아이템 이미지의 CLIP 임베딩과 스타일 앵커 유사도를 계산.
-    Returns: (bonus_score, embedding_list_or_None)
-    """
     if not image_url or not style_key or not anchors:
         return 0.0, None
 
@@ -389,7 +418,6 @@ def _clip_style_score(image_url: str, style_key: str, anchors: dict) -> Tuple[fl
 
         sim = float(calc_style_similarity(vec, anchor_vec))
         sim = max(-1.0, min(1.0, sim))
-        # sim 범위 -1~1을 -5~+8 점수로 변환 (긍정 쪽 가중)
         bonus = sim * 6.0 if sim > 0 else sim * 3.0
         return round(bonus, 2), vec.tolist()
     except Exception as e:
@@ -397,14 +425,20 @@ def _clip_style_score(image_url: str, style_key: str, anchors: dict) -> Tuple[fl
         return 0.0, None
 
 
-def _score_items_raw(req: RecommendRequest, weather: WeatherResponse, style_ctx_override: Optional[str] = None) -> List[dict]:
+def _score_items_raw(
+    req: RecommendRequest,
+    weather: WeatherResponse,
+    style_ctx_override: Optional[str] = None,
+) -> List[dict]:
     pref = load_user_preference(req.userId)
+
+    # Phase 3: 학습 가중치 로드
+    learning_weights = get_learning_weights(req.userId)
 
     style_ctx = (style_ctx_override or req.style or "").strip().lower()
     if not style_ctx:
         style_ctx = get_current_style_context()
 
-    # 스타일 앵커 로드
     anchors = load_style_anchors()
 
     results: List[dict] = []
@@ -419,12 +453,12 @@ def _score_items_raw(req: RecommendRequest, weather: WeatherResponse, style_ctx_
             item.season = inferred_season
             item.thickness = inferred_thickness
 
-            pref_score = personalization_weight(item, pref) * 10
+            # Phase 3: 학습 가중치를 personalization_weight에 전달
+            pref_score = personalization_weight(item, pref, learning_weights=learning_weights) * 10
             worn_penalty = recently_worn_penalty(getattr(item, "lastWornAt", None))
             weather_score = calculate_weather_match(item, weather)
             tpo_multiplier = apply_time_score(item, style_ctx)
 
-            # CLIP 이미지 기반 스타일 점수
             image_url = (getattr(item, "imageUrl", None) or "").strip()
             clip_bonus, embedding = _clip_style_score(image_url, style_ctx, anchors)
 
@@ -459,10 +493,10 @@ def _score_items_raw(req: RecommendRequest, weather: WeatherResponse, style_ctx_
                     "style": style_ctx,
                     "inferred": f"{inferred_season}/{inferred_thickness}",
                     "cat": item.category,
+                    "hasLearningWeights": bool(learning_weights),
                 },
             }
 
-            # 임베딩을 코디 세트 단계에서 재활용
             if embedding is not None:
                 result_item["imageEmbedding"] = embedding
 
@@ -510,7 +544,6 @@ DEFAULT_POLICY = OutfitPolicy(True, True, 0.78, 3.5, 1.8, 60.0, 61.5, False)
 
 def _get_policy(style: Optional[str]) -> OutfitPolicy:
     key = (style or "default").strip().lower()
-    # beta style도 정책은 default로 (원하면 beta별 정책 추가 가능)
     return STYLE_POLICIES.get(key, DEFAULT_POLICY)
 
 
@@ -543,15 +576,14 @@ def pick_balanced_recommend(scored: List[dict], total: int = 10, min_top: int = 
 @router.get("/styles")
 @limiter.limit("30/minute")
 def recommend_styles(request: Request, userId: str = Query(..., description="user id")):
-    """
-    ✅ 추천탭 스타일 선택 버튼용
-    - base: 모두 사용 가능
-    - beta: 프리미엄만 사용 가능(서버에서 강제)
-    """
     premium = is_premium_user(userId)
     styles: List[Dict[str, Any]] = []
 
     for s in BASE_STYLES:
+        styles.append({"key": s, "label": s, "isBeta": False, "premiumRequired": False})
+
+    # Phase 1: 확장 스타일도 노출
+    for s in EXPANDED_STYLES:
         styles.append({"key": s, "label": s, "isBeta": False, "premiumRequired": False})
 
     for s in BETA_STYLES:
@@ -623,7 +655,9 @@ def recommend_outfits(
     premium = is_premium_user(req.userId)
     effective_style = _enforce_style_for_user(req.style, premium)
 
-    # ✅ maxSets 정책 적용
+    # Phase 5: 멀티스타일 처리
+    effective_styles = _enforce_styles_for_user(req.styles, premium) if req.styles else None
+
     if maxSets is None:
         effective_max_sets = PREMIUM_DEFAULT_MAX_SETS if premium else FREE_DEFAULT_MAX_SETS
     else:
@@ -633,8 +667,9 @@ def recommend_outfits(
             effective_max_sets = min(int(maxSets), FREE_DEFAULT_MAX_SETS)
 
     logger.info(
-        "[RECOMMEND_OUTFITS] user=%s premium=%s style=%s->%s items=%d maxSets=%s effectiveMax=%d",
-        req.userId, premium, (req.style or ""), effective_style, len(req.clothes), maxSets, effective_max_sets
+        "[RECOMMEND_OUTFITS] user=%s premium=%s style=%s->%s styles=%s items=%d maxSets=%s effectiveMax=%d",
+        req.userId, premium, (req.style or ""), effective_style,
+        effective_styles, len(req.clothes), maxSets, effective_max_sets
     )
 
     weather = _build_weather(req)
@@ -644,7 +679,6 @@ def recommend_outfits(
 
     scored = _score_items_raw(req, weather, style_ctx_override=effective_style)
 
-    # 기존 코디 제외 요청 시, 스코어에 랜덤 노이즈를 추가하여 다른 조합 생성
     if req.excludeItemSets:
         rng = np.random.default_rng()
         for item in scored:
@@ -687,7 +721,6 @@ def recommend_outfits(
         counts, base_ref, base_floor, final_floor, min_base_score, min_outfit_score
     )
 
-    # excludeItemSets가 있으면 더 많이 생성해서 제외 후 잘라냄
     exclude_sigs: set = set()
     if req.excludeItemSets:
         exclude_sigs = {"|".join(sorted(ids)) for ids in req.excludeItemSets}
@@ -698,6 +731,7 @@ def recommend_outfits(
         scored_outfit,
         weather={"temp": weather.temp, "pty": weather.pty},
         style=effective_style,
+        styles=effective_styles,
         max_sets=gen_max,
         min_base_score=min_base_score,
         min_outfit_score=min_outfit_score,
@@ -733,6 +767,7 @@ def recommend_outfits(
             scored_outfit,
             weather={"temp": weather.temp, "pty": weather.pty},
             style=effective_style,
+            styles=effective_styles,
             max_sets=gen_max,
             min_base_score=relaxed_min_base,
             min_outfit_score=relaxed_min_outfit,
@@ -753,11 +788,10 @@ def recommend_outfits(
 
     outfits_raw = outfits_raw[:effective_max_sets]
 
-    # ✅ style anchors 준비 (현재 style_encoder 구현 기준)
-    # - 텍스트+이미지 앵커를 쓰려면 style_encoder를 "anchors.json 로드" 방식으로 바꾸면
-    #   이 recommend.py는 그대로 두고도 styleSim/styleScore에 바로 반영됩니다.
+    # Phase 3: 앵커 + 유저 스타일 벡터 혼합
     anchors = load_style_anchors()
-    anchor = anchors.get((effective_style or "").strip().lower())
+    anchor_key = (effective_style or "").strip().lower()
+    mixed_anchor = _get_mixed_anchor(anchor_key, req.userId, anchors)
 
     outfits: List[OutfitSet] = []
     for o in outfits_raw:
@@ -767,10 +801,10 @@ def recommend_outfits(
         style_sim: Optional[float] = None
         style_score: Optional[float] = None
 
-        if anchor is not None:
+        if mixed_anchor is not None:
             outfit_vec = _outfit_embedding_from_items(raw_items)
             if outfit_vec is not None:
-                style_sim = float(calc_style_similarity(outfit_vec, anchor))
+                style_sim = float(calc_style_similarity(outfit_vec, mixed_anchor))
                 style_score = _sim_to_score(style_sim)
 
         outfits.append(
