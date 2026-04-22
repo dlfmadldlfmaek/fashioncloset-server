@@ -1,4 +1,4 @@
-FROM python:3.10-slim-bookworm
+FROM python:3.10-slim
 
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
@@ -16,12 +16,13 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
       torch==2.2.2+cpu torchvision==0.17.2+cpu && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir --no-deps git+https://github.com/openai/CLIP.git
+    pip install --no-cache-dir -r requirements.txt
+
 
 COPY . .
 
 RUN useradd -m appuser && chown -R appuser:appuser /app
+RUN python -c "import hashlib, pathlib; p=pathlib.Path('main.py'); print('BUILD_MAIN_EXISTS=', p.exists()); print('BUILD_MAIN_MD5=', hashlib.md5(p.read_bytes()).hexdigest() if p.exists() else None); q=pathlib.Path('services/style_encoder.py'); print('BUILD_STYLE_EXISTS=', q.exists()); print('BUILD_STYLE_MD5=', hashlib.md5(q.read_bytes()).hexdigest() if q.exists() else None)"
 
 USER appuser
 

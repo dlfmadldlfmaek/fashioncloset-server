@@ -66,13 +66,7 @@ STYLE_DIR: Path = _resolve_style_dir()
 # ✅ main.py에서 import하는 상수 (ImportError 방지)
 def _resolve_anchor_json_path() -> Path:
     raw = (os.getenv("STYLE_ANCHOR_JSON") or "").strip()
-    if raw:
-        return Path(raw)
-    # Phase 1: FashionCLIP 앵커 우선, 없으면 기존 앵커 fallback
-    v2 = STYLE_DIR / "anchors_v2.json"
-    if v2.exists():
-        return v2
-    return STYLE_DIR / "anchors.json"
+    return Path(raw) if raw else (STYLE_DIR / "anchors.json")
 
 
 ANCHOR_JSON_PATH: Path = _resolve_anchor_json_path()

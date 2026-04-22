@@ -17,6 +17,13 @@ _LOAD_LOCK = threading.Lock()
 
 
 def get_device(prefer: Optional[str] = None) -> torch.device:
+    """
+    Resolve torch device.
+
+    prefer:
+      - "cpu" / "cuda" / "mps" (if available)
+      - None -> auto
+    """
     global _DEVICE
     if _DEVICE is not None and prefer is None:
         return _DEVICE
@@ -41,7 +48,11 @@ def get_device(prefer: Optional[str] = None) -> torch.device:
 
 
 def _load_model(*, device: Optional[torch.device] = None, model_name: str = "ViT-B/32"):
-    """Lazily load CLIP model once per process."""
+    """
+    Lazily load CLIP model once per process.
+
+    Why: avoid repeated heavyweight loads + be thread-safe under FastAPI concurrency.
+    """
     global _MODEL, _PREPROCESS
 
     if _MODEL is not None and _PREPROCESS is not None:
@@ -58,7 +69,12 @@ def _load_model(*, device: Optional[torch.device] = None, model_name: str = "ViT
 
 
 def encode_image(image_path: str, *, device: Optional[str] = None) -> List[float]:
-    """Encode a single image into a normalized CLIP embedding (512-dim)."""
+    """
+    Encode a single image into a normalized CLIP embedding.
+
+    Returns:
+      List[float] length depends on model (ViT-B/32 -> 512).
+    """
     if not image_path or not isinstance(image_path, str):
         raise ValueError("image_path must be a non-empty string")
 
@@ -89,7 +105,9 @@ def encode_images(
     device: Optional[str] = None,
     batch_size: int = 32,
 ) -> List[List[float]]:
-    """Encode multiple images in batches for higher throughput."""
+    """
+    Encode multiple images in batches for higher throughput.
+    """
     paths = list(image_paths or [])
     if not paths:
         return []

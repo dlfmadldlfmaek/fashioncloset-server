@@ -49,6 +49,7 @@ class OutfitSet(BaseModel):
     items: List[RecommendItem] = Field(default_factory=list)
     outfitScore: float = 0.0
 
+    # ✅ NEW: 코디 세트 스타일 유사도/점수 (옵션)
     styleSim: Optional[float] = None       # cosine similarity (-1~1)
     styleScore: Optional[float] = None     # 0~100 변환 점수
 

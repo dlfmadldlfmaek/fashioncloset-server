@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, Literal, Optional
 
 from google.cloud import firestore
@@ -9,32 +10,27 @@ from services.firestore import get_db
 
 logger = logging.getLogger("learning")
 
-# Phase 3: 적응적 LR + 확장된 가중치 범위
-BASE_LR: float = 0.03
-MIN_W: float = -1.0
-MAX_W: float = 1.0
+# Firestore client: use shared singleton from services.firestore
 
-# DISCOVERY 가중치 상향 (0.5 → 0.7)
-DISCOVERY_LR_RATIO: float = 0.7
-
-# 적응적 LR: 성공 횟수 기반 decay
-# LR = BASE_LR / (1 + success_count * DECAY_RATE)
-DECAY_RATE: float = 0.05
+# Learning constants
+LR: float = 0.03
+MIN_W: float = -0.6
+MAX_W: float = 0.6
 
 Outcome = Literal["SUCCESS", "FAILURE", "DISCOVERY"]
 
 
-def _adaptive_lr(base_lr: float, success_count: int) -> float:
-    """성공 횟수가 많을수록 LR 감소 (이미 잘 학습된 영역은 천천히 조정)."""
-    count = max(0, int(success_count))
-    return base_lr / (1.0 + count * DECAY_RATE)
-
-
 def _clamp(v: float) -> float:
+    """Clamp weight within [MIN_W, MAX_W]."""
     return max(MIN_W, min(MAX_W, float(v)))
 
 
 def _norm_key(v: Optional[Any]) -> str:
+    """
+    Normalize map keys to avoid key explosion.
+
+    Why: Firestore map keys are effectively unbounded; normalize casing/whitespace.
+    """
     if v is None:
         return "UNKNOWN"
     s = str(v).strip()
@@ -51,9 +47,6 @@ def _ensure_maps(w: Dict[str, Any]) -> None:
         "categoryFail",
         "colorFail",
         "seasonFail",
-        "categorySuccess",
-        "colorSuccess",
-        "seasonSuccess",
     ):
         if k not in w or not isinstance(w.get(k), dict):
             w[k] = {}
@@ -66,6 +59,14 @@ def _update_in_transaction(
     item: Dict[str, Any],
     outcome: Outcome,
 ) -> None:
+    """
+    Transactional update to user learning weights.
+
+    outcome:
+      - SUCCESS   : user liked/wore (positive)
+      - FAILURE   : user skipped/disliked (negative, progressive)
+      - DISCOVERY : user wore something not recommended (mild positive)
+    """
     snapshot = ref.get(transaction=transaction)
     w: Dict[str, Any] = snapshot.to_dict() if snapshot.exists else {}
     _ensure_maps(w)
@@ -74,27 +75,16 @@ def _update_in_transaction(
     color = _norm_key(item.get("color"))
     season = _norm_key(item.get("season"))
 
-    # 성공 카운터 로드 (적응적 LR용)
-    cat_success = int(w["categorySuccess"].get(main_cat, 0))
-    col_success = int(w["colorSuccess"].get(color, 0))
-    sea_success = int(w["seasonSuccess"].get(season, 0))
-    avg_success = (cat_success + col_success + sea_success) / 3.0
-
-    lr = _adaptive_lr(BASE_LR, int(avg_success))
-
     if outcome == "SUCCESS":
-        delta = lr
+        delta = LR
         w["categoryFail"][main_cat] = 0
         w["colorFail"][color] = 0
         w["seasonFail"][season] = 0
-        # 성공 카운터 증가
-        w["categorySuccess"][main_cat] = cat_success + 1
-        w["colorSuccess"][color] = col_success + 1
-        w["seasonSuccess"][season] = sea_success + 1
 
     elif outcome == "DISCOVERY":
-        # Phase 3: DISCOVERY LR 상향 (0.5 → 0.7)
-        delta = lr * DISCOVERY_LR_RATIO
+        # Slight positive: "you missed it but user wore it"
+        delta = LR * 0.5
+        # Do not reset fail counters aggressively for discovery
 
     else:  # FAILURE
         cat_fail = int(w["categoryFail"].get(main_cat, 0)) + 1
@@ -106,16 +96,19 @@ def _update_in_transaction(
         w["seasonFail"][season] = sea_fail
 
         penalty_multiplier = 1 + min(max(cat_fail, col_fail, sea_fail), 5) * 0.5
-        delta = -lr * penalty_multiplier
+        delta = -LR * penalty_multiplier
 
     w["categoryWeight"][main_cat] = _clamp(float(w["categoryWeight"].get(main_cat, 0.0)) + delta)
     w["colorWeight"][color] = _clamp(float(w["colorWeight"].get(color, 0.0)) + delta)
     w["seasonWeight"][season] = _clamp(float(w["seasonWeight"].get(season, 0.0)) + delta)
 
+    # Prefer server-side timestamp for consistency
     w["updatedAt"] = firestore.SERVER_TIMESTAMP
+    # Keep createdAt stable if you want (optional)
     if "createdAt" not in w:
         w["createdAt"] = firestore.SERVER_TIMESTAMP
 
+    # merge=True prevents accidental deletion of unrelated fields
     transaction.set(ref, w, merge=True)
 
 
@@ -124,6 +117,12 @@ def update_learning_weight(
     item: Dict[str, Any],
     outcome: Outcome,
 ) -> None:
+    """
+    Public API.
+
+    item: dict must include (at least) id plus optional mainCategory/color/season.
+    outcome: "SUCCESS" | "FAILURE" | "DISCOVERY"
+    """
     if not user_id:
         raise ValueError("user_id is required")
     if outcome not in ("SUCCESS", "FAILURE", "DISCOVERY"):
@@ -143,26 +142,11 @@ def update_learning_weight(
         )
     except Exception:
         logger.exception("[LEARNING] update failed user=%s item=%s", user_id, item.get("id", "UNKNOWN"))
+        # keep raising if you want caller to handle, or swallow:
+        # return
         raise
 
 
-def get_learning_weights(user_id: str) -> Dict[str, Any]:
-    """Phase 3: 유저 학습 가중치 조회 (scoring.py에서 사용)."""
-    if not user_id:
-        return {}
-
-    try:
-        db = get_db()
-        ref = db.collection("learning_weights").document(user_id)
-        snapshot = ref.get()
-        if snapshot.exists:
-            return snapshot.to_dict() or {}
-    except Exception:
-        logger.exception("[LEARNING] get_learning_weights failed user=%s", user_id)
-
-    return {}
-
-
-# Backward-compat wrapper
+# Backward-compat wrapper (if some callers still pass success: bool)
 def update_learning_weight_bool(user_id: str, item: Dict[str, Any], success: bool) -> None:
     update_learning_weight(user_id, item, "SUCCESS" if success else "FAILURE")

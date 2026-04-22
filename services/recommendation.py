@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, Iterable, Optional, Set
+from typing import Iterable, Optional, Set, Dict
 from zoneinfo import ZoneInfo
 
 SEOUL = ZoneInfo("Asia/Seoul")
@@ -13,7 +13,9 @@ def _norm(s: str) -> str:
 
 
 def get_current_style_context(now: Optional[datetime] = None) -> str:
-    """Default style context by Seoul time (fallback when user doesn't pick a style)."""
+    """
+    Default style context by Seoul time (fallback when user doesn't pick a style).
+    """
     now = now.astimezone(SEOUL) if now else datetime.now(SEOUL)
 
     if 0 <= now.weekday() <= 3:
@@ -24,7 +26,7 @@ def get_current_style_context(now: Optional[datetime] = None) -> str:
 
 
 # -----------------------
-# Style keyword profiles
+# ✅ Style keyword profiles
 # -----------------------
 STYLE_POS: Dict[str, Set[str]] = {
     "casual": {
@@ -56,29 +58,9 @@ STYLE_POS: Dict[str, Set[str]] = {
         "앤틱", "70년대", "80년대", "90년대", "빈티지워싱", "디스트로이드", "페이드",
         "브라운", "버건디", "머스타드", "카키", "패치워크", "자수", "핸드메이드",
     },
-    # Phase 1: 확장 스타일
-    "gorpcore": {
-        "고프코어", "아웃도어", "등산", "트레킹", "플리스", "후리스", "윈드브레이커",
-        "카고", "나일론", "고어텍스", "방수", "캠핑", "기능성",
-    },
-    "workwear": {
-        "워크웨어", "작업복", "데님", "캔버스", "카펜터", "오버롤",
-        "유틸리티", "포켓", "더블니", "헤비코튼", "워크부츠",
-    },
-    "preppy": {
-        "프레피", "아이비", "카라", "폴로", "체크", "타탄", "블레이저", "로퍼",
-        "옥스포드", "치노", "스트라이프", "니트조끼", "가디건",
-    },
-    "romantic": {
-        "로맨틱", "페미닌", "플라워", "꽃무늬", "레이스", "프릴", "러플", "시폰",
-        "플리츠", "리본", "파스텔", "핑크", "라벤더", "원피스", "블라우스",
-    },
-    "sporty": {
-        "스포티", "애슬레저", "트랙", "져지", "스웻", "레깅스", "운동", "러닝",
-        "트레이닝", "나이키", "아디다스", "퓨마", "조거", "메쉬", "스트레치",
-    },
 }
 
+# ✅ "이 스타일이면 싫어할만한 키워드(감점)"도 같이 둠
 STYLE_NEG: Dict[str, Set[str]] = {
     "minimal": {
         "스트릿", "오버사이즈", "힙합", "카고", "테크웨어", "그래픽", "로고", "프린트", "패턴", "카모",
@@ -96,15 +78,13 @@ STYLE_NEG: Dict[str, Set[str]] = {
         "정장", "드레스", "셋업", "턱시도", "수트",
     },
     "vintage": {"테크웨어", "나일론", "메쉬", "형광"},
-    "gorpcore": {"정장", "드레스", "포멀", "셋업", "턱시도", "힐", "로퍼"},
-    "workwear": {"정장", "드레스", "포멀", "시폰", "레이스", "프릴"},
-    "preppy": {"힙합", "스트릿", "오버사이즈", "카고", "테크웨어", "그래픽"},
-    "romantic": {"카고", "테크웨어", "힙합", "스트릿", "워크부츠", "밀리터리"},
-    "sporty": {"정장", "드레스", "포멀", "로퍼", "힐", "셋업", "수트"},
 }
 
 
 def _count_hits(tags: Iterable[str], targets: Set[str]) -> int:
+    """
+    Count hits using substring match.
+    """
     tag_list = [_norm(t) for t in (tags or []) if isinstance(t, str) and t.strip()]
     if not tag_list or not targets:
         return 0
@@ -122,9 +102,10 @@ def _count_hits(tags: Iterable[str], targets: Set[str]) -> int:
 
 def apply_time_score(item: object, style: Optional[str] = None, *, now: Optional[datetime] = None) -> float:
     """
-    스타일 분리 강화 버전.
+    ✅ 스타일 분리 강하게 버전 (street vs minimal 차이 확실히)
     - 선택 스타일 pos hit: 강하게 가산
     - 선택 스타일 neg hit: 강하게 감산
+    - 다른 스타일 pos가 더 잘 맞으면 감산(기존보다 강함)
     """
     style_key = _norm(style or "")
     if not style_key:
@@ -132,6 +113,7 @@ def apply_time_score(item: object, style: Optional[str] = None, *, now: Optional
 
     tags = getattr(item, "tags", None) or []
 
+    # pos/neg hit
     hit_pos_map = {k: _count_hits(tags, v) for k, v in STYLE_POS.items()}
     chosen_pos = hit_pos_map.get(style_key, 0)
 
@@ -140,6 +122,10 @@ def apply_time_score(item: object, style: Optional[str] = None, *, now: Optional
 
     chosen_neg = _count_hits(tags, STYLE_NEG.get(style_key, set()))
 
+    # -----------------------
+    # 1) 기본 가산 (선택 스타일 pos)
+    # -----------------------
+    # ✅ 기존보다 더 벌려줌
     if chosen_pos >= 4:
         mult = 1.45
     elif chosen_pos == 3:
@@ -151,6 +137,10 @@ def apply_time_score(item: object, style: Optional[str] = None, *, now: Optional
     else:
         mult = 1.00
 
+    # -----------------------
+    # 2) 감산 (선택 스타일 neg)
+    # -----------------------
+    # ✅ minimal에 스트릿 요소가 섞이면 확실히 떨어지게
     if chosen_neg >= 3:
         mult *= 0.78
     elif chosen_neg == 2:
@@ -158,6 +148,10 @@ def apply_time_score(item: object, style: Optional[str] = None, *, now: Optional
     elif chosen_neg == 1:
         mult *= 0.93
 
+    # -----------------------
+    # 3) 감산 (다른 스타일이 더 잘 맞는 경우)
+    # -----------------------
+    # ✅ 기존보다 강하게 감산해서 "비슷비슷" 방지
     if chosen_pos == 0 and max_other_pos >= 2:
         mult *= 0.78
     elif chosen_pos == 0 and max_other_pos == 1:
@@ -167,6 +161,7 @@ def apply_time_score(item: object, style: Optional[str] = None, *, now: Optional
     elif chosen_pos == 1 and max_other_pos == 2:
         mult *= 0.92
 
+    # 하한/상한 (너무 튀는 것 방지)
     if mult < 0.70:
         mult = 0.70
     if mult > 1.55:

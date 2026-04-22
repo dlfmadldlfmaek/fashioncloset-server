@@ -14,6 +14,7 @@ from services.url_validator import validate_url_for_fetch
 
 logger = logging.getLogger(__name__)
 
+# requests 재사용(커넥션 풀)
 _SESSION = requests.Session()
 _SESSION.headers.update(
     {
@@ -22,9 +23,11 @@ _SESSION.headers.update(
     }
 )
 
-_MAX_IMAGE_PIXELS = 20_000_000
+# 너무 큰 이미지로 메모리 터지는 것 방지(원하면 조절)
+_MAX_IMAGE_PIXELS = 20_000_000  # 20MP
 Image.MAX_IMAGE_PIXELS = _MAX_IMAGE_PIXELS
 
+# 프로세스당 1회 로딩 (지연 로딩)
 _MODEL = None
 _PREPROCESS = None
 _DEVICE = None
@@ -52,17 +55,23 @@ def _l2_normalize(v: np.ndarray) -> np.ndarray:
 
 
 def _get_clip():
-    """Lazily load CLIP model once per process."""
+    """
+    Lazily load CLIP model once per process.
+
+    Why:
+    - Avoid crashing the whole service at import-time if torch/clip deps are missing.
+    - Improve Cloud Run readiness by deferring heavy init until actually used.
+    """
     global _MODEL, _PREPROCESS, _DEVICE
 
     if _MODEL is not None and _PREPROCESS is not None and _DEVICE is not None:
         return _MODEL, _PREPROCESS, _DEVICE
 
     try:
-        import torch
-        import clip
+        import torch  # lazy
+        import clip  # lazy
     except Exception as e:
-        logger.exception("[CLIP] import failed (torch/clip). err=%s", e)
+        logger.exception("[CLIP] import failed (torch/clip). Check requirements.txt pins. err=%s", e)
         raise
 
     _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -79,10 +88,16 @@ def _get_clip():
 
 
 def encode_outfit_image(image_path: str) -> np.ndarray:
-    """Local image path -> CLIP image embedding (512,) float32 numpy."""
+    """
+    Local image path -> CLIP image embedding (512,) float32 numpy.
+    """
     model, preprocess, device = _get_clip()
 
-    import torch
+    try:
+        import torch
+    except Exception as e:
+        logger.exception("[CLIP] torch import failed at encode_outfit_image. err=%s", e)
+        raise
 
     img = Image.open(image_path).convert("RGB")
     image = preprocess(img).unsqueeze(0).to(device)
@@ -96,10 +111,17 @@ def encode_outfit_image(image_path: str) -> np.ndarray:
 
 @lru_cache(maxsize=512)
 def encode_outfit_image_from_url(url: str) -> np.ndarray:
-    """URL image -> CLIP image embedding (512,) float32 numpy. Cached by URL."""
+    """
+    URL image -> CLIP image embedding (512,) float32 numpy.
+    Cached by URL to reduce Cloud Run cost and latency.
+    """
     model, preprocess, device = _get_clip()
 
-    import torch
+    try:
+        import torch
+    except Exception as e:
+        logger.exception("[CLIP] torch import failed at encode_outfit_image_from_url. err=%s", e)
+        raise
 
     validate_url_for_fetch(url)
 
@@ -126,7 +148,9 @@ def encode_outfit_image_from_url(url: str) -> np.ndarray:
 
 
 def encode_text(texts: Union[str, Iterable[str]]) -> np.ndarray:
-    """Text(s) -> mean CLIP text embedding (512,) float32 numpy."""
+    """
+    Text(s) -> mean CLIP text embedding (512,) float32 numpy.
+    """
     if isinstance(texts, str):
         texts_list = [texts]
     else:
@@ -142,8 +166,12 @@ def encode_text(texts: Union[str, Iterable[str]]) -> np.ndarray:
 def _encode_text_cached(texts_tuple: tuple[str, ...]) -> np.ndarray:
     model, _, device = _get_clip()
 
-    import torch
-    import clip
+    try:
+        import torch
+        import clip
+    except Exception as e:
+        logger.exception("[CLIP] import failed at _encode_text_cached. err=%s", e)
+        raise
 
     tokens = clip.tokenize(list(texts_tuple)).to(device)
 
@@ -162,7 +190,10 @@ def cosine_similarity(
     a: Union[np.ndarray, Sequence[float]],
     b: Union[np.ndarray, Sequence[float]],
 ) -> float:
-    """Safe cosine similarity. Returns 0.0 on dimension mismatch."""
+    """
+    Safe cosine similarity.
+    Returns 0.0 on dimension mismatch.
+    """
     va = _l2_normalize(_as_1d_vector(a))
     vb = _l2_normalize(_as_1d_vector(b))
 

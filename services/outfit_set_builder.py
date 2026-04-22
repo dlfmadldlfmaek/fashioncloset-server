@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
-from services.compatibility import predict_compatibility
 from services.style_encoder import load_style_anchors, calc_style_similarity
 
 
@@ -114,32 +113,6 @@ STYLE_POS: Dict[str, Set[str]] = {
         "앤틱", "70년대", "80년대", "90년대", "빈티지워싱", "디스트로이드", "페이드",
         "브라운", "버건디", "머스타드", "카키", "패치워크", "자수", "핸드메이드",
     },
-    # Phase 1: 확장 스타일 (5 -> 10)
-    "gorpcore": {
-        "고프코어", "아웃도어", "등산", "트레킹", "플리스", "후리스", "윈드브레이커",
-        "카고", "나일론", "고어텍스", "방수", "캠핑", "기능성", "스트랩", "카라비너",
-        "등산화", "트레일", "파타고니아", "노스페이스", "아크테릭스",
-    },
-    "workwear": {
-        "워크웨어", "작업복", "데님", "캔버스", "카펜터", "오버롤", "점프수트",
-        "유틸리티", "포켓", "더블니", "헤비코튼", "워크부츠", "레드윙", "카키",
-        "브라운", "네이비", "헤리티지",
-    },
-    "preppy": {
-        "프레피", "아이비", "카라", "폴로", "체크", "타탄", "블레이저", "로퍼",
-        "옥스포드", "치노", "스트라이프", "니트조끼", "가디건", "보타이",
-        "네이비", "버건디", "크림", "그린",
-    },
-    "romantic": {
-        "로맨틱", "페미닌", "플라워", "꽃무늬", "레이스", "프릴", "러플", "시폰",
-        "쉬폰", "플리츠", "리본", "파스텔", "핑크", "라벤더", "오프숄더",
-        "원피스", "블라우스", "스커트", "미디", "플로럴",
-    },
-    "sporty": {
-        "스포티", "애슬레저", "트랙", "져지", "스웻", "레깅스", "운동", "러닝",
-        "트레이닝", "나이키", "아디다스", "퓨마", "조거", "메쉬", "스트레치",
-        "스포츠브라", "반바지", "캡", "스니커즈", "기능성",
-    },
 }
 
 STYLE_NEG: Dict[str, Set[str]] = {
@@ -157,11 +130,6 @@ STYLE_NEG: Dict[str, Set[str]] = {
     },
     "casual": {"정장", "드레스", "셋업", "턱시도", "수트"},
     "vintage": {"테크웨어", "나일론", "메쉬", "형광"},
-    "gorpcore": {"정장", "드레스", "포멀", "셋업", "턱시도", "힐", "로퍼"},
-    "workwear": {"정장", "드레스", "포멀", "시폰", "레이스", "프릴"},
-    "preppy": {"힙합", "스트릿", "오버사이즈", "카고", "테크웨어", "그래픽"},
-    "romantic": {"카고", "테크웨어", "힙합", "스트릿", "워크부츠", "밀리터리"},
-    "sporty": {"정장", "드레스", "포멀", "로퍼", "힐", "셋업", "수트"},
 }
 
 
@@ -377,31 +345,6 @@ def _style_tag_presence(tags: List[str]) -> Dict[str, int]:
                     break
     return out
 
-def _compatibility_model_score(items: List[Dict[str, Any]]) -> Tuple[float, Dict[str, Any]]:
-    """Phase 2: 호환성 모델로 아이템 쌍 점수 계산."""
-    pairs = []
-    total_score = 0.0
-    count = 0
-
-    for i in range(len(items)):
-        for j in range(i + 1, len(items)):
-            emb_a = items[i].get("imageEmbedding")
-            emb_b = items[j].get("imageEmbedding")
-            score = predict_compatibility(emb_a, emb_b)
-            pairs.append({
-                "a": str(items[i].get("id", "")),
-                "b": str(items[j].get("id", "")),
-                "score": round(score, 3),
-            })
-            total_score += score
-            count += 1
-
-    avg = total_score / max(count, 1)
-    # 0.5 = 중립, 0~0.5 = 비호환, 0.5~1 = 호환 → -2 ~ +2 범위로 변환
-    bonus = (avg - 0.5) * 4.0
-    return bonus, {"avgCompat": round(avg, 3), "pairs": pairs, "bonus": round(bonus, 3)}
-
-
 def _pair_quality_score(
     items: List[Dict[str, Any]],
     *,
@@ -412,7 +355,6 @@ def _pair_quality_score(
     조합 품질 점수:
     + 색상/톤 매칭
     + 두께/날씨 적합
-    + 호환성 모델 점수 (Phase 2)
     - 시즌 충돌
     - 스타일 강충돌(포멀 상의 + 트레이닝/스트릿 하의 등)
     """
@@ -511,12 +453,6 @@ def _pair_quality_score(
         if top_tags["street"] > 2 and bottom_tags["formal"] > 0:
             score -= 1.5
 
-    # ---- 5) Phase 2: 호환성 모델 점수 (0.6 모델 + 0.4 규칙 가중 평균)
-    compat_bonus, compat_dbg = _compatibility_model_score(items)
-    rule_score = score
-    score = rule_score * 0.4 + (rule_score + compat_bonus) * 0.6
-    dbg["compatibility"] = compat_dbg
-
     dbg["total"] = round(score, 3)
     return float(score), dbg
 
@@ -603,7 +539,6 @@ def build_outfit_sets(
     *,
     weather: Optional[Dict[str, Any]] = None,
     style: Optional[str] = None,
-    styles: Optional[List[str]] = None,
     top_n_each: int = 6,
     max_sets: int = 10,
     cold_temp_threshold: float = 12.0,
@@ -612,9 +547,10 @@ def build_outfit_sets(
     threshold_include_style: bool = True,
     threshold_include_weather: bool = True,
     allow_singles: bool = True,
-    min_sets: int = 3,
+    min_sets: int = 3,  # ✅ 최소 3세트 보장
     anchor_weight: float = 8.0,
     tag_weight: float = 1.0,
+    # ✅ 조합 품질 점수 가중치
     quality_weight: float = 1.0,
     body_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
@@ -687,48 +623,29 @@ def build_outfit_sets(
             if need_outer and any(_canonical_category(it.get("mainCategory") or it.get("category")) == "OUTER" for it in items):
                 w_bonus += 0.8
 
-        # style bonus: anchor + tag (Phase 5: 멀티스타일 지원)
+        # style bonus: anchor + tag
         s_bonus_total = 0.0
-        effective_styles = styles if styles else ([style] if style else [])
-        dbg_style: Dict[str, Any] = {"styles": [_norm(s) for s in effective_styles]}
+        dbg_style: Dict[str, Any] = {"style": _norm(style)}
 
-        if _include_style and effective_styles:
-            style_count = len(effective_styles)
-            all_anchor_dbg = []
-            all_tag_dbg = []
+        if _include_style:
+            a_bonus, a_dbg = _style_bonus_anchor(items, style, anchors=anchors, weight=float(anchor_weight))
+            s_bonus_total += a_bonus
+            dbg_style["anchor"] = a_dbg
 
-            for s in effective_styles:
-                a_bonus, a_dbg = _style_bonus_anchor(items, s, anchors=anchors, weight=float(anchor_weight))
-                s_bonus_total += a_bonus / style_count
-                all_anchor_dbg.append(a_dbg)
+            t_bonus, t_dbg = _style_bonus_tag(items, style)
+            t_bonus_scaled = float(t_bonus) * float(tag_weight)
+            s_bonus_total += t_bonus_scaled
+            dbg_style["tag"] = {**t_dbg, "scaledBonus": round(t_bonus_scaled, 3)}
 
-                t_bonus, t_dbg = _style_bonus_tag(items, s)
-                t_bonus_scaled = float(t_bonus) * float(tag_weight)
-                s_bonus_total += t_bonus_scaled / style_count
-                all_tag_dbg.append({**t_dbg, "scaledBonus": round(t_bonus_scaled, 3)})
-
-            dbg_style["anchor"] = all_anchor_dbg if style_count > 1 else all_anchor_dbg[0]
-            dbg_style["tag"] = all_tag_dbg if style_count > 1 else all_tag_dbg[0]
-
-            # 전멸 방지: 멀티스타일일 때는 NEG 충돌 패널티 완화
-            if style_count == 1:
-                neg = int((all_tag_dbg[0] or {}).get("neg", 0))
-                if _apply_style_penalty and neg >= 2 and float(all_tag_dbg[0].get("bonus", 0.0)) <= 0.0:
-                    s_bonus_total -= float(_style_penalty)
-                    dbg_style["penalty"] = float(_style_penalty)
-                else:
-                    dbg_style["penalty"] = 0.0
+            # 전멸 방지: 컷 대신 패널티
+            neg = int((t_dbg or {}).get("neg", 0))
+            if _apply_style_penalty and neg >= 2 and float(t_dbg.get("bonus", 0.0)) <= 0.0:
+                s_bonus_total -= float(_style_penalty)
+                dbg_style["penalty"] = float(_style_penalty)
             else:
-                # 멀티스타일: NEG 패널티 50% 감면
-                total_neg = sum(int((d or {}).get("neg", 0)) for d in all_tag_dbg)
-                if _apply_style_penalty and total_neg >= 4:
-                    reduced_penalty = float(_style_penalty) * 0.5
-                    s_bonus_total -= reduced_penalty
-                    dbg_style["penalty"] = reduced_penalty
-                else:
-                    dbg_style["penalty"] = 0.0
+                dbg_style["penalty"] = 0.0
 
-        # 조합 품질 점수(룰 기반 + 호환성 모델)
+        # ✅ 조합 품질 점수(룰 기반)
         q_bonus, q_dbg = _pair_quality_score(items, weather_temp=temp_f, need_outer=need_outer)
         q_bonus_scaled = float(q_bonus) * float(quality_weight)
 
