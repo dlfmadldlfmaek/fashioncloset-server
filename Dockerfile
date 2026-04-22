@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+RUN pip install --no-cache-dir pip==24.0 setuptools==69.5.1 wheel==0.43.0 && \
     pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
       torch==2.2.2+cpu torchvision==0.17.2+cpu && \
     pip install --no-cache-dir -r requirements.txt
