@@ -18,8 +18,6 @@ ftfy>=6.2.0,<7
 regex>=2024.4
 tqdm>=4.66.0,<5
 
-# CLIP (OpenAI ViT-B/32)
-clip @ git+https://github.com/openai/CLIP.git
 
 # Testing
 pytest>=8.0,<9
