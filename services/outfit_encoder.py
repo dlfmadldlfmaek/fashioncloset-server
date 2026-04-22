@@ -16,7 +16,6 @@ from services.url_validator import validate_url_for_fetch
 
 logger = logging.getLogger(__name__)
 
-# requests 재사용(커넥션 풀)
 _SESSION = requests.Session()
 _SESSION.headers.update(
     {
@@ -25,17 +24,16 @@ _SESSION.headers.update(
     }
 )
 
-# 너무 큰 이미지로 메모리 터지는 것 방지
-_MAX_IMAGE_PIXELS = 20_000_000  # 20MP
+_MAX_IMAGE_PIXELS = 20_000_000
 Image.MAX_IMAGE_PIXELS = _MAX_IMAGE_PIXELS
 
-# FashionCLIP 모델 (프로세스당 1회 지연 로딩)
 _MODEL = None
-_PROCESSOR = None
+_PREPROCESS = None
+_TOKENIZER = None
 _DEVICE = None
 _LOAD_LOCK = threading.Lock()
 
-_MODEL_NAME = os.getenv("FASHIONCLIP_MODEL", "patrickjohncyh/fashion-clip")
+_MODEL_NAME = os.getenv("FASHIONCLIP_MODEL", "hf-hub:patrickjohncyh/fashion-clip")
 
 
 def _open_image_from_bytes(data: bytes) -> Image.Image:
@@ -59,23 +57,23 @@ def _l2_normalize(v: np.ndarray) -> np.ndarray:
     return v / n
 
 
-def _get_fashionclip():
+def _get_clip():
     """
-    Lazily load FashionCLIP model once per process.
+    Lazily load FashionCLIP via open_clip once per process.
     patrickjohncyh/fashion-clip: 패션 이미지 80만장으로 fine-tune된 CLIP ViT-B/32.
     """
-    global _MODEL, _PROCESSOR, _DEVICE
+    global _MODEL, _PREPROCESS, _TOKENIZER, _DEVICE
 
-    if _MODEL is not None and _PROCESSOR is not None and _DEVICE is not None:
-        return _MODEL, _PROCESSOR, _DEVICE
+    if _MODEL is not None and _PREPROCESS is not None and _DEVICE is not None:
+        return _MODEL, _PREPROCESS, _TOKENIZER, _DEVICE
 
     with _LOAD_LOCK:
-        if _MODEL is not None and _PROCESSOR is not None and _DEVICE is not None:
-            return _MODEL, _PROCESSOR, _DEVICE
+        if _MODEL is not None and _PREPROCESS is not None and _DEVICE is not None:
+            return _MODEL, _PREPROCESS, _TOKENIZER, _DEVICE
 
         try:
             import torch
-            from transformers import CLIPModel, CLIPProcessor
+            import open_clip
         except Exception as e:
             logger.exception("[FASHIONCLIP] import failed. err=%s", e)
             raise
@@ -83,27 +81,28 @@ def _get_fashionclip():
         _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
         try:
-            _PROCESSOR = CLIPProcessor.from_pretrained(_MODEL_NAME)
-            _MODEL = CLIPModel.from_pretrained(_MODEL_NAME).to(_DEVICE)
+            _MODEL, _, _PREPROCESS = open_clip.create_model_and_transforms(_MODEL_NAME)
+            _TOKENIZER = open_clip.get_tokenizer(_MODEL_NAME)
+            _MODEL = _MODEL.to(_DEVICE)
             _MODEL.eval()
             logger.info("[FASHIONCLIP] loaded model=%s device=%s", _MODEL_NAME, _DEVICE)
         except Exception as e:
             logger.exception("[FASHIONCLIP] model load failed. err=%s", e)
             raise
 
-    return _MODEL, _PROCESSOR, _DEVICE
+    return _MODEL, _PREPROCESS, _TOKENIZER, _DEVICE
 
 
 def encode_outfit_image(image_path: str) -> np.ndarray:
     """Local image path -> FashionCLIP image embedding (512,) float32 numpy."""
     import torch
 
-    model, processor, device = _get_fashionclip()
+    model, preprocess, _, device = _get_clip()
     img = Image.open(image_path).convert("RGB")
-    inputs = processor(images=img, return_tensors="pt").to(device)
+    image = preprocess(img).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        vec = model.get_image_features(**inputs)
+        vec = model.encode_image(image)
 
     vec = vec / vec.norm(dim=-1, keepdim=True)
     return vec[0].detach().cpu().numpy().astype(np.float32)
@@ -114,7 +113,7 @@ def encode_outfit_image_from_url(url: str) -> np.ndarray:
     """URL image -> FashionCLIP image embedding (512,) float32 numpy. Cached by URL."""
     import torch
 
-    model, processor, device = _get_fashionclip()
+    model, preprocess, _, device = _get_clip()
 
     validate_url_for_fetch(url)
 
@@ -131,10 +130,10 @@ def encode_outfit_image_from_url(url: str) -> np.ndarray:
         logger.warning("[FASHIONCLIP] image decode failed url=%s err=%s", url, e)
         raise
 
-    inputs = processor(images=img, return_tensors="pt").to(device)
+    image = preprocess(img).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        vec = model.get_image_features(**inputs)
+        vec = model.encode_image(image)
 
     vec = vec / vec.norm(dim=-1, keepdim=True)
     return vec[0].detach().cpu().numpy().astype(np.float32)
@@ -157,12 +156,12 @@ def encode_text(texts: Union[str, Iterable[str]]) -> np.ndarray:
 def _encode_text_cached(texts_tuple: tuple[str, ...]) -> np.ndarray:
     import torch
 
-    model, processor, device = _get_fashionclip()
+    model, _, tokenizer, device = _get_clip()
 
-    inputs = processor(text=list(texts_tuple), return_tensors="pt", padding=True, truncation=True).to(device)
+    tokens = tokenizer(list(texts_tuple)).to(device)
 
     with torch.no_grad():
-        vecs = model.get_text_features(**inputs)
+        vecs = model.encode_text(tokens)
 
     vecs = vecs / vecs.norm(dim=-1, keepdim=True)
 

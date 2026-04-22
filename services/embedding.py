@@ -13,11 +13,13 @@ logger = logging.getLogger(__name__)
 
 _DEVICE: Optional[torch.device] = None
 _MODEL = None
-_PROCESSOR = None
+_PREPROCESS = None
+_TOKENIZER = None
 _LOAD_LOCK = threading.Lock()
 
-# FashionCLIP 모델 (패션 이미지 80만장으로 fine-tune된 CLIP ViT-B/32)
-_MODEL_NAME = os.getenv("FASHIONCLIP_MODEL", "patrickjohncyh/fashion-clip")
+# FashionCLIP: patrickjohncyh/fashion-clip via open_clip
+# HuggingFace hub에서 로드 — 패션 이미지 80만장 fine-tuned CLIP ViT-B/32
+_MODEL_NAME = os.getenv("FASHIONCLIP_MODEL", "hf-hub:patrickjohncyh/fashion-clip")
 
 
 def get_device(prefer: Optional[str] = None) -> torch.device:
@@ -46,26 +48,26 @@ def get_device(prefer: Optional[str] = None) -> torch.device:
 
 def _load_model(*, device: Optional[torch.device] = None):
     """
-    Lazily load FashionCLIP model once per process.
-    FashionCLIP: patrickjohncyh/fashion-clip — 패션 도메인 특화 CLIP ViT-B/32.
-    출력 512-dim, 기존 CLIP과 API 호환.
+    Lazily load FashionCLIP via open_clip once per process.
+    512-dim output, 기존 CLIP ViT-B/32와 API 호환.
     """
-    global _MODEL, _PROCESSOR
+    global _MODEL, _PREPROCESS, _TOKENIZER
 
-    if _MODEL is not None and _PROCESSOR is not None:
-        return _MODEL, _PROCESSOR
+    if _MODEL is not None and _PREPROCESS is not None:
+        return _MODEL, _PREPROCESS, _TOKENIZER
 
     with _LOAD_LOCK:
-        if _MODEL is None or _PROCESSOR is None:
-            from transformers import CLIPModel, CLIPProcessor
+        if _MODEL is None or _PREPROCESS is None:
+            import open_clip
 
             dev = device or get_device()
-            _PROCESSOR = CLIPProcessor.from_pretrained(_MODEL_NAME)
-            _MODEL = CLIPModel.from_pretrained(_MODEL_NAME).to(dev)
+            _MODEL, _, _PREPROCESS = open_clip.create_model_and_transforms(_MODEL_NAME)
+            _TOKENIZER = open_clip.get_tokenizer(_MODEL_NAME)
+            _MODEL = _MODEL.to(dev)
             _MODEL.eval()
             logger.info("[EMBEDDING] loaded FashionCLIP model=%s device=%s", _MODEL_NAME, dev)
 
-    return _MODEL, _PROCESSOR
+    return _MODEL, _PREPROCESS, _TOKENIZER
 
 
 def encode_image(image_path: str, *, device: Optional[str] = None) -> List[float]:
@@ -80,7 +82,7 @@ def encode_image(image_path: str, *, device: Optional[str] = None) -> List[float
         raise FileNotFoundError(f"image not found: {image_path}")
 
     dev = get_device(device)
-    model, processor = _load_model(device=dev)
+    model, preprocess, _ = _load_model(device=dev)
 
     try:
         with Image.open(image_path) as img:
@@ -88,10 +90,10 @@ def encode_image(image_path: str, *, device: Optional[str] = None) -> List[float
     except UnidentifiedImageError as e:
         raise ValueError(f"invalid image file: {image_path}") from e
 
-    inputs = processor(images=image, return_tensors="pt").to(dev)
+    image_input = preprocess(image).unsqueeze(0).to(dev)
 
     with torch.inference_mode():
-        emb = model.get_image_features(**inputs)
+        emb = model.encode_image(image_input)
         emb = emb / emb.norm(dim=-1, keepdim=True)
 
     return emb[0].detach().cpu().tolist()
@@ -109,7 +111,7 @@ def encode_images(
         return []
 
     dev = get_device(device)
-    model, processor = _load_model(device=dev)
+    model, preprocess, _ = _load_model(device=dev)
 
     out: List[List[float]] = []
     i = 0
@@ -121,14 +123,14 @@ def encode_images(
                 raise FileNotFoundError(f"image not found: {p}")
             try:
                 with Image.open(p) as img:
-                    images.append(img.convert("RGB"))
+                    images.append(preprocess(img.convert("RGB")))
             except UnidentifiedImageError as e:
                 raise ValueError(f"invalid image file: {p}") from e
 
-        inputs = processor(images=images, return_tensors="pt", padding=True).to(dev)
+        image_input = torch.stack(images, dim=0).to(dev)
 
         with torch.inference_mode():
-            emb = model.get_image_features(**inputs)
+            emb = model.encode_image(image_input)
             emb = emb / emb.norm(dim=-1, keepdim=True)
 
         out.extend(emb.detach().cpu().tolist())
