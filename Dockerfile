@@ -19,7 +19,13 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
       torch==2.2.2+cpu && \
     pip install --no-cache-dir -r requirements.txt
 
+# 의존성 검증
+RUN python -c "import torch; import transformers; import numpy; import fastapi; print('ALL IMPORTS OK')"
+
 COPY . .
+
+# 앱 코드 import 검증
+RUN python -c "import sys; sys.path.insert(0,'.'); from services.embedding import get_device; print('APP IMPORTS OK')"
 
 RUN useradd -m appuser && chown -R appuser:appuser /app
 
