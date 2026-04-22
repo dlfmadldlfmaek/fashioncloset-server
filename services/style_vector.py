@@ -9,17 +9,15 @@ from google.cloud import firestore
 
 logger = logging.getLogger(__name__)
 
+# Phase 3: EMA 계수 (α=0.3 → 최근 착용이 30% 영향, 누적이 70%)
+EMA_ALPHA: float = 0.3
+
 
 def get_db() -> firestore.Client:
-    """
-    Cloud Run 안전: 요청 시점에 Client 생성.
-    (네 프로젝트에서 이미 이 정책을 쓰고 있으니 통일)
-    """
     return firestore.Client()
 
 
 def _as_1d_float_vector(x: object) -> Optional[np.ndarray]:
-    """Return finite 1D float32 vector or None."""
     try:
         v = np.asarray(x, dtype=np.float32)
     except Exception:
@@ -45,8 +43,6 @@ def _update_in_transaction(
     outfit_vector: np.ndarray,
 ) -> None:
     snapshot = ref.get(transaction=transaction)
-
-    # 항상 정규화된 값으로 들어가게
     outfit_vector = _l2_normalize(outfit_vector)
 
     if snapshot.exists:
@@ -55,7 +51,6 @@ def _update_in_transaction(
         old_raw = data.get("vector")
         old_vec = _as_1d_float_vector(old_raw)
         if old_vec is None:
-            # 기존 데이터가 깨진 경우: 새 벡터로 리셋(운영 안전)
             transaction.set(
                 ref,
                 {
@@ -69,7 +64,6 @@ def _update_in_transaction(
             return
 
         if old_vec.shape[0] != outfit_vector.shape[0]:
-            # 차원 불일치: 안전하게 스킵 or 리셋 선택
             logger.warning(
                 "[STYLE_VECTOR] dim mismatch style=%s old=%d new=%d (skip update)",
                 ref.id,
@@ -82,8 +76,10 @@ def _update_in_transaction(
         if count < 1:
             count = 1
 
-        # 점진 평균
-        new_vec = (old_vec * count + outfit_vector) / (count + 1)
+        # Phase 3: EMA (지수이동평균) — 최근 착용이 더 큰 영향
+        # 기존: 단순 평균 (old * count + new) / (count + 1)
+        # 변경: new_vec = α * new + (1 - α) * old
+        new_vec = EMA_ALPHA * outfit_vector + (1.0 - EMA_ALPHA) * old_vec
         new_vec = _l2_normalize(new_vec)
 
         transaction.update(
@@ -95,7 +91,7 @@ def _update_in_transaction(
             },
         )
 
-        logger.info("[STYLE_VECTOR] updated style=%s count=%d", ref.id, count + 1)
+        logger.info("[STYLE_VECTOR] updated (EMA α=%.2f) style=%s count=%d", EMA_ALPHA, ref.id, count + 1)
 
     else:
         transaction.set(
@@ -110,11 +106,6 @@ def _update_in_transaction(
 
 
 def update_style_vector(user_id: str, style: str, outfit_vector: object) -> None:
-    """
-    users/{uid}/style_vectors/{style}
-    - outfit_vector는 list/np.ndarray 모두 가능.
-    - 내부에서 검증/정규화 후 트랜잭션으로 원자 업데이트.
-    """
     vec = _as_1d_float_vector(outfit_vector)
     if vec is None:
         logger.warning("[STYLE_VECTOR] invalid outfit_vector user=%s style=%s", user_id, style)
@@ -132,4 +123,23 @@ def update_style_vector(user_id: str, style: str, outfit_vector: object) -> None
         _update_in_transaction(tx, ref, vec)
     except Exception as e:
         logger.exception("[STYLE_VECTOR] update failed user=%s style=%s err=%s", user_id, style, e)
-        # 필요하면 여기서 raise
+
+
+def get_user_style_vector(user_id: str, style: str) -> Optional[np.ndarray]:
+    """Phase 3: 유저 스타일 벡터 조회 (api/recommend.py에서 앵커 혼합용)."""
+    try:
+        db = get_db()
+        ref = (
+            db.collection("users")
+            .document(user_id)
+            .collection("style_vectors")
+            .document(style)
+        )
+        snapshot = ref.get()
+        if snapshot.exists:
+            data = snapshot.to_dict() or {}
+            return _as_1d_float_vector(data.get("vector"))
+    except Exception as e:
+        logger.exception("[STYLE_VECTOR] get failed user=%s style=%s err=%s", user_id, style, e)
+
+    return None

@@ -42,6 +42,11 @@ class RecommendRequest(BaseModel):
     lon: float = Field(default=0.0, ge=-180, le=180)
     temp: Optional[float] = Field(default=None, description="Temperature in Celsius. If provided, skips weather API.")
     style: Optional[str] = None
+    # Phase 5: 멀티스타일 지�� (예: ["casual", "minimal"])
+    styles: Optional[List[str]] = Field(
+        default=None,
+        description="Multiple styles for mix recommendation. Overrides 'style' if provided.",
+    )
     clothes: List[ClothesItem]
     excludeItemSets: Optional[List[List[str]]] = Field(
         default=None,
