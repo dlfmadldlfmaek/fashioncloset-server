@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import threading
 from functools import lru_cache
 from io import BytesIO
 from typing import Iterable, Sequence, Union
@@ -29,11 +27,7 @@ Image.MAX_IMAGE_PIXELS = _MAX_IMAGE_PIXELS
 
 _MODEL = None
 _PREPROCESS = None
-_TOKENIZER = None
 _DEVICE = None
-_LOAD_LOCK = threading.Lock()
-
-_MODEL_NAME = os.getenv("FASHIONCLIP_MODEL", "hf-hub:patrickjohncyh/fashion-clip")
 
 
 def _open_image_from_bytes(data: bytes) -> Image.Image:
@@ -58,46 +52,38 @@ def _l2_normalize(v: np.ndarray) -> np.ndarray:
 
 
 def _get_clip():
-    """
-    Lazily load FashionCLIP via open_clip once per process.
-    patrickjohncyh/fashion-clip: 패션 이미지 80만장으로 fine-tune된 CLIP ViT-B/32.
-    """
-    global _MODEL, _PREPROCESS, _TOKENIZER, _DEVICE
+    """Lazily load CLIP model once per process."""
+    global _MODEL, _PREPROCESS, _DEVICE
 
     if _MODEL is not None and _PREPROCESS is not None and _DEVICE is not None:
-        return _MODEL, _PREPROCESS, _TOKENIZER, _DEVICE
+        return _MODEL, _PREPROCESS, _DEVICE
 
-    with _LOAD_LOCK:
-        if _MODEL is not None and _PREPROCESS is not None and _DEVICE is not None:
-            return _MODEL, _PREPROCESS, _TOKENIZER, _DEVICE
+    try:
+        import torch
+        import clip
+    except Exception as e:
+        logger.exception("[CLIP] import failed (torch/clip). err=%s", e)
+        raise
 
-        try:
-            import torch
-            import open_clip
-        except Exception as e:
-            logger.exception("[FASHIONCLIP] import failed. err=%s", e)
-            raise
+    _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-        _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    try:
+        _MODEL, _PREPROCESS = clip.load("ViT-B/32", device=_DEVICE)
+        _MODEL.eval()
+        logger.info("[CLIP] loaded model=ViT-B/32 device=%s", _DEVICE)
+    except Exception as e:
+        logger.exception("[CLIP] model load failed. err=%s", e)
+        raise
 
-        try:
-            _MODEL, _, _PREPROCESS = open_clip.create_model_and_transforms(_MODEL_NAME)
-            _TOKENIZER = open_clip.get_tokenizer(_MODEL_NAME)
-            _MODEL = _MODEL.to(_DEVICE)
-            _MODEL.eval()
-            logger.info("[FASHIONCLIP] loaded model=%s device=%s", _MODEL_NAME, _DEVICE)
-        except Exception as e:
-            logger.exception("[FASHIONCLIP] model load failed. err=%s", e)
-            raise
-
-    return _MODEL, _PREPROCESS, _TOKENIZER, _DEVICE
+    return _MODEL, _PREPROCESS, _DEVICE
 
 
 def encode_outfit_image(image_path: str) -> np.ndarray:
-    """Local image path -> FashionCLIP image embedding (512,) float32 numpy."""
+    """Local image path -> CLIP image embedding (512,) float32 numpy."""
+    model, preprocess, device = _get_clip()
+
     import torch
 
-    model, preprocess, _, device = _get_clip()
     img = Image.open(image_path).convert("RGB")
     image = preprocess(img).unsqueeze(0).to(device)
 
@@ -105,15 +91,15 @@ def encode_outfit_image(image_path: str) -> np.ndarray:
         vec = model.encode_image(image)
 
     vec = vec / vec.norm(dim=-1, keepdim=True)
-    return vec[0].detach().cpu().numpy().astype(np.float32)
+    return vec.detach().cpu().numpy()[0].astype(np.float32)
 
 
 @lru_cache(maxsize=512)
 def encode_outfit_image_from_url(url: str) -> np.ndarray:
-    """URL image -> FashionCLIP image embedding (512,) float32 numpy. Cached by URL."""
-    import torch
+    """URL image -> CLIP image embedding (512,) float32 numpy. Cached by URL."""
+    model, preprocess, device = _get_clip()
 
-    model, preprocess, _, device = _get_clip()
+    import torch
 
     validate_url_for_fetch(url)
 
@@ -121,13 +107,13 @@ def encode_outfit_image_from_url(url: str) -> np.ndarray:
         res = _SESSION.get(url, timeout=7.0)
         res.raise_for_status()
     except Exception as e:
-        logger.warning("[FASHIONCLIP] image fetch failed url=%s err=%s", url, e)
+        logger.warning("[CLIP] image fetch failed url=%s err=%s", url, e)
         raise
 
     try:
         img = _open_image_from_bytes(res.content)
     except Exception as e:
-        logger.warning("[FASHIONCLIP] image decode failed url=%s err=%s", url, e)
+        logger.warning("[CLIP] image decode failed url=%s err=%s", url, e)
         raise
 
     image = preprocess(img).unsqueeze(0).to(device)
@@ -136,11 +122,11 @@ def encode_outfit_image_from_url(url: str) -> np.ndarray:
         vec = model.encode_image(image)
 
     vec = vec / vec.norm(dim=-1, keepdim=True)
-    return vec[0].detach().cpu().numpy().astype(np.float32)
+    return vec.detach().cpu().numpy()[0].astype(np.float32)
 
 
 def encode_text(texts: Union[str, Iterable[str]]) -> np.ndarray:
-    """Text(s) -> mean FashionCLIP text embedding (512,) float32 numpy."""
+    """Text(s) -> mean CLIP text embedding (512,) float32 numpy."""
     if isinstance(texts, str):
         texts_list = [texts]
     else:
@@ -154,11 +140,12 @@ def encode_text(texts: Union[str, Iterable[str]]) -> np.ndarray:
 
 @lru_cache(maxsize=256)
 def _encode_text_cached(texts_tuple: tuple[str, ...]) -> np.ndarray:
+    model, _, device = _get_clip()
+
     import torch
+    import clip
 
-    model, _, tokenizer, device = _get_clip()
-
-    tokens = tokenizer(list(texts_tuple)).to(device)
+    tokens = clip.tokenize(list(texts_tuple)).to(device)
 
     with torch.no_grad():
         vecs = model.encode_text(tokens)
@@ -180,7 +167,7 @@ def cosine_similarity(
     vb = _l2_normalize(_as_1d_vector(b))
 
     if va.shape[0] != vb.shape[0]:
-        logger.warning("[FASHIONCLIP] cosine_similarity dim mismatch: %s vs %s", va.shape, vb.shape)
+        logger.warning("[CLIP] cosine_similarity dim mismatch: %s vs %s", va.shape, vb.shape)
         return 0.0
 
     return float(np.dot(va, vb))

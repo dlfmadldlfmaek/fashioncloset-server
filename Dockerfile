@@ -15,7 +15,7 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
-      torch==2.2.2+cpu && \
+      torch==2.2.2+cpu torchvision==0.17.2+cpu && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY . .

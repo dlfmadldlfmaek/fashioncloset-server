@@ -1,25 +1,19 @@
 # services/embedding.py
 from __future__ import annotations
 
-import logging
 import os
 import threading
 from typing import Iterable, List, Optional
 
 import torch
+import clip
 from PIL import Image, UnidentifiedImageError
 
-logger = logging.getLogger(__name__)
 
 _DEVICE: Optional[torch.device] = None
 _MODEL = None
 _PREPROCESS = None
-_TOKENIZER = None
 _LOAD_LOCK = threading.Lock()
-
-# FashionCLIP: patrickjohncyh/fashion-clip via open_clip
-# HuggingFace hub에서 로드 — 패션 이미지 80만장 fine-tuned CLIP ViT-B/32
-_MODEL_NAME = os.getenv("FASHIONCLIP_MODEL", "hf-hub:patrickjohncyh/fashion-clip")
 
 
 def get_device(prefer: Optional[str] = None) -> torch.device:
@@ -46,35 +40,25 @@ def get_device(prefer: Optional[str] = None) -> torch.device:
     return _DEVICE
 
 
-def _load_model(*, device: Optional[torch.device] = None):
-    """
-    Lazily load FashionCLIP via open_clip once per process.
-    512-dim output, 기존 CLIP ViT-B/32와 API 호환.
-    """
-    global _MODEL, _PREPROCESS, _TOKENIZER
+def _load_model(*, device: Optional[torch.device] = None, model_name: str = "ViT-B/32"):
+    """Lazily load CLIP model once per process."""
+    global _MODEL, _PREPROCESS
 
     if _MODEL is not None and _PREPROCESS is not None:
-        return _MODEL, _PREPROCESS, _TOKENIZER
+        return _MODEL, _PREPROCESS
 
     with _LOAD_LOCK:
         if _MODEL is None or _PREPROCESS is None:
-            import open_clip
-
             dev = device or get_device()
-            _MODEL, _, _PREPROCESS = open_clip.create_model_and_transforms(_MODEL_NAME)
-            _TOKENIZER = open_clip.get_tokenizer(_MODEL_NAME)
-            _MODEL = _MODEL.to(dev)
-            _MODEL.eval()
-            logger.info("[EMBEDDING] loaded FashionCLIP model=%s device=%s", _MODEL_NAME, dev)
+            model, preprocess = clip.load(model_name, device=dev)
+            model.eval()
+            _MODEL, _PREPROCESS = model, preprocess
 
-    return _MODEL, _PREPROCESS, _TOKENIZER
+    return _MODEL, _PREPROCESS
 
 
 def encode_image(image_path: str, *, device: Optional[str] = None) -> List[float]:
-    """
-    Encode a single image into a normalized FashionCLIP embedding.
-    Returns List[float] of length 512.
-    """
+    """Encode a single image into a normalized CLIP embedding (512-dim)."""
     if not image_path or not isinstance(image_path, str):
         raise ValueError("image_path must be a non-empty string")
 
@@ -82,7 +66,7 @@ def encode_image(image_path: str, *, device: Optional[str] = None) -> List[float
         raise FileNotFoundError(f"image not found: {image_path}")
 
     dev = get_device(device)
-    model, preprocess, _ = _load_model(device=dev)
+    model, preprocess = _load_model(device=dev)
 
     try:
         with Image.open(image_path) as img:
@@ -111,7 +95,7 @@ def encode_images(
         return []
 
     dev = get_device(device)
-    model, preprocess, _ = _load_model(device=dev)
+    model, preprocess = _load_model(device=dev)
 
     out: List[List[float]] = []
     i = 0

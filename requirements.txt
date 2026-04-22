@@ -18,8 +18,8 @@ ftfy>=6.2.0,<7
 regex>=2024.4
 tqdm>=4.66.0,<5
 
-# Phase 1: FashionCLIP (open_clip_torch — 경량 CLIP 라이브러리)
-open_clip_torch>=2.24.0,<3
+# CLIP (OpenAI ViT-B/32)
+clip @ git+https://github.com/openai/CLIP.git
 
 # Testing
 pytest>=8.0,<9
