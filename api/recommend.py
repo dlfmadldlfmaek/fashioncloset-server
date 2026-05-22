@@ -1,6 +1,7 @@
 # api/recommend.py
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,7 +20,10 @@ from schemas.response import (
 )
 from services.diversify import diversify
 from services.learning import get_learning_weights
-from services.outfit_encoder import encode_outfit_image_from_url
+from services.outfit_encoder import (
+    encode_outfit_image_from_url,
+    prewarm_image_embeddings,
+)
 from services.outfit_set_builder import build_outfit_sets
 from services.premium import is_premium_user
 from services.recommend_cache import (
@@ -441,6 +445,19 @@ def _score_items_raw(
 
     anchors = load_style_anchors()
 
+    # Pre-warm CLIP image embeddings concurrently so the per-item loop below
+    # hits cache instead of downloading+encoding each image sequentially
+    # (the sequential path overran the app's 30s timeout on a cold instance).
+    try:
+        t_warm = time.perf_counter()
+        warmed = prewarm_image_embeddings(
+            (getattr(it, "imageUrl", None) or "") for it in req.clothes
+        )
+        if warmed:
+            logger.info("[PREWARM] %d images in %.2fs", warmed, time.perf_counter() - t_warm)
+    except Exception as e:
+        logger.warning("[PREWARM] failed err=%s", e)
+
     results: List[dict] = []
     base_score = 50.0
 
@@ -677,6 +694,25 @@ def recommend_outfits(
     if not req.clothes:
         return RecommendOutfitResponse(weather=weather, outfits=[])
 
+    # Persistent cache. Skip for "더보기"/append requests (excludeItemSets),
+    # which are intentionally varied with random noise below.
+    cache_key: Optional[str] = None
+    if not req.excludeItemSets:
+        try:
+            clothes_key = clothes_hash([c.model_dump() for c in req.clothes])
+            temp_key = int(req.temp) if req.temp is not None else 0
+            styles_key = ",".join(effective_styles) if effective_styles else "-"
+            slot = f"outfits:{effective_style}:{req.bodyType or '-'}:{styles_key}"
+            cache_key = build_cache_key(
+                req.userId, temp_key, effective_max_sets, slot, clothes_key
+            )
+            cached = get_cached_recommend(cache_key)
+            if cached:
+                logger.info("[RECOMMEND_OUTFITS] cache hit user=%s", req.userId)
+                return RecommendOutfitResponse(**cached)
+        except Exception:
+            cache_key = None
+
     scored = _score_items_raw(req, weather, style_ctx_override=effective_style)
 
     if req.excludeItemSets:
@@ -817,4 +853,12 @@ def recommend_outfits(
             )
         )
 
-    return RecommendOutfitResponse(weather=weather, outfits=outfits)
+    result = RecommendOutfitResponse(weather=weather, outfits=outfits)
+
+    if cache_key:
+        try:
+            set_cached_recommend(cache_key, result.model_dump(), minutes=20)
+        except Exception:
+            pass
+
+    return result

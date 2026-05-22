@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from io import BytesIO
 from typing import Iterable, Sequence, Union
@@ -31,6 +33,7 @@ Image.MAX_IMAGE_PIXELS = _MAX_IMAGE_PIXELS
 _MODEL = None
 _PREPROCESS = None
 _DEVICE = None
+_MODEL_LOCK = threading.Lock()
 
 
 def _open_image_from_bytes(data: bytes) -> Image.Image:
@@ -67,22 +70,28 @@ def _get_clip():
     if _MODEL is not None and _PREPROCESS is not None and _DEVICE is not None:
         return _MODEL, _PREPROCESS, _DEVICE
 
-    try:
-        import torch  # lazy
-        import clip  # lazy
-    except Exception as e:
-        logger.exception("[CLIP] import failed (torch/clip). Check requirements.txt pins. err=%s", e)
-        raise
+    # Serialize concurrent first-time loads: on a cold start several worker
+    # threads can reach here at once and must not race the model loader.
+    with _MODEL_LOCK:
+        if _MODEL is not None and _PREPROCESS is not None and _DEVICE is not None:
+            return _MODEL, _PREPROCESS, _DEVICE
 
-    _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+        try:
+            import torch  # lazy
+            import clip  # lazy
+        except Exception as e:
+            logger.exception("[CLIP] import failed (torch/clip). Check requirements.txt pins. err=%s", e)
+            raise
 
-    try:
-        _MODEL, _PREPROCESS = clip.load("ViT-B/32", device=_DEVICE)
-        _MODEL.eval()
-        logger.info("[CLIP] loaded model=ViT-B/32 device=%s", _DEVICE)
-    except Exception as e:
-        logger.exception("[CLIP] model load failed. err=%s", e)
-        raise
+        _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+        try:
+            _MODEL, _PREPROCESS = clip.load("ViT-B/32", device=_DEVICE)
+            _MODEL.eval()
+            logger.info("[CLIP] loaded model=ViT-B/32 device=%s", _DEVICE)
+        except Exception as e:
+            logger.exception("[CLIP] model load failed. err=%s", e)
+            raise
 
     return _MODEL, _PREPROCESS, _DEVICE
 
@@ -145,6 +154,55 @@ def encode_outfit_image_from_url(url: str) -> np.ndarray:
 
     vec = vec / vec.norm(dim=-1, keepdim=True)
     return vec.detach().cpu().numpy()[0].astype(np.float32)
+
+
+_PREWARM_MAX_WORKERS = 8
+
+
+def prewarm_image_embeddings(urls: Iterable[str]) -> int:
+    """
+    Download + CLIP-encode the given image URLs concurrently, populating the
+    encode_outfit_image_from_url() lru_cache.
+
+    Why:
+    - The recommend scoring loop encodes images one at a time (~1-2s each).
+      For a real closet (~16 items) on a cold Cloud Run instance the loop ran
+      ~32s and overran the app's 30s receiveTimeout, surfacing as a false
+      "server connection failed" error.
+    - Pre-warming the cache in parallel turns the subsequent per-item calls
+      into instant cache hits.
+
+    Returns the number of unique URLs processed. Best-effort: individual
+    fetch/encode failures are swallowed (already logged downstream).
+    """
+    unique: list[str] = []
+    seen: set[str] = set()
+    for u in urls:
+        s = (u or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            unique.append(s)
+    if not unique:
+        return 0
+
+    # Load the model once, single-threaded, before fanning out so worker
+    # threads don't all hit the lazy loader at the same time.
+    try:
+        _get_clip()
+    except Exception:
+        return 0
+
+    def _warm(url: str) -> None:
+        try:
+            encode_outfit_image_from_url(url)
+        except Exception:
+            pass  # encode_outfit_image_from_url already logs the failure
+
+    workers = min(_PREWARM_MAX_WORKERS, len(unique))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="clip-warm") as ex:
+        list(ex.map(_warm, unique))
+
+    return len(unique)
 
 
 def encode_text(texts: Union[str, Iterable[str]]) -> np.ndarray:
