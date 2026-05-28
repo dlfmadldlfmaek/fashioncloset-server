@@ -194,10 +194,24 @@ def _tryon_prompt(view: str, keep_background: bool, category: str = "auto", user
         "Strictly maintain the person's original body topology, 3-dimensional body "
         "shape, and natural curves from the last image. [CRITICAL] Do NOT flatten "
         "or alter the person's chest volume, waist line, hip curves, or any "
-        "anatomical proportion. The new clothing must conform tightly and "
-        "naturally to the person's EXISTING silhouette and volume, with realistic "
-        "fabric tension over the actual body contours. Never reshape the person "
-        "to a generic mannequin.",
+        "anatomical proportion. Never reshape the person to a generic mannequin. "
+        "The clothing drapes over the person's EXISTING body according to the "
+        "GARMENT'S OWN fit — tight garments hug the body, loose garments hang away "
+        "from it. NEVER force a loose or oversized garment to cling tightly to the "
+        "body just to match the person's silhouette.",
+        "",
+        "## Target garment fidelity (preserve the reference garment's own design)",
+        "[CRITICAL] Reproduce the target garment EXACTLY as shown in its clothing "
+        "reference image — its real design, not a generic or simplified version:",
+        "- Length / hem position: knee-length bermuda shorts STAY knee-length; "
+        "long or midi lengths stay long. NEVER shorten the garment.",
+        "- Silhouette / fit: oversized, baggy, wide, or relaxed cuts STAY oversized, "
+        "baggy, wide, or relaxed. Do NOT slim, taper, or shrink a loose garment "
+        "onto the body.",
+        "- Fabric & texture: match the reference material and how it drapes "
+        "(e.g. sweat / jersey knit vs woven vs denim).",
+        "- Overall proportions and volume must match the reference garment, not a "
+        "default short/tight version.",
         "",
         "## Hand & finger anatomy (anti-blurring)",
         "Preserve the person's exact hand and finger poses from the original "
