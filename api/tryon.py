@@ -236,7 +236,21 @@ def _tryon_prompt(view: str, keep_background: bool, category: str = "auto", user
         "",
         "## Identity",
         "Preserve the person's face, hairstyle, head pose, skin tone, and visible "
-        "accessories. The face must be unchanged — same features, same expression.",
+        "accessories. The face must be unchanged — same features, same expression. "
+        "Do NOT add any tattoo, mark, scar, or skin feature that is not already on "
+        "the person in the LAST image.",
+        "",
+        "## Reference isolation (extract the garment only, never the reference model)",
+        "[CRITICAL] The clothing reference images usually show a MODEL wearing the "
+        "garment — often with other clothes, shoes, accessories, a background, and "
+        "the model's own body features such as tattoos, skin tone, and physique. "
+        "Take ONLY the target garment's design (shape, color, pattern, length, "
+        "material) from those references. NEVER copy onto the person any of the "
+        "reference model's tattoos, marks, skin tone, body/physique, face, hair, "
+        "OTHER garments, footwear, accessories, or background. The person to dress "
+        "is the LAST image only: their skin (including the ABSENCE of tattoos), "
+        "body, face, hair, footwear, and every non-target garment must stay exactly "
+        "as shown in that last image.",
         "",
         "## Body topology and 3D shape (anti-flattening)",
         "Strictly maintain the person's original body topology, 3-dimensional body "
