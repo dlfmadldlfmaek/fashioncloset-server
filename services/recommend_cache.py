@@ -82,8 +82,14 @@ def build_cache_key(
     ny: int,
     time_slot: str,
     clothes_hash_key: str,
+    style: str = "",
+    body_type: str = "",
 ) -> str:
-    return f"{user_id}:{nx}:{ny}:{time_slot}:{clothes_hash_key}"
+    # 1.12.1+91 이전엔 style이 key에서 빠져 있어 캐주얼→포멀→미니멀 다 같은
+    # 캐시(첫 응답)를 20분간 반환했음. body_type도 같이 추가해 정확성 확보.
+    s = (style or "").strip().lower()
+    b = (body_type or "").strip().lower()
+    return f"{user_id}:{nx}:{ny}:{time_slot}:{clothes_hash_key}:{s}:{b}"
 
 
 def get_cached_recommend(key: str) -> Optional[Dict[str, Any]]:

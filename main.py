@@ -40,6 +40,8 @@ def _ensure_routers(app: FastAPI) -> None:
             "retention": {"enabled": False, "error": None},
             "ad": {"enabled": False, "error": None},
             "classify": {"enabled": False, "error": None},
+            "auth": {"enabled": False, "error": None},
+            "weather": {"enabled": False, "error": None},
         }
 
 
@@ -124,6 +126,8 @@ _include_router_safe(app, "quota", lambda: __import__("api.quota", fromlist=["ro
 _include_router_safe(app, "retention", lambda: __import__("api.retention", fromlist=["router"]).router)
 _include_router_safe(app, "ad", lambda: __import__("api.ad", fromlist=["router"]).router)
 _include_router_safe(app, "classify", lambda: __import__("api.classify", fromlist=["router"]).router)
+_include_router_safe(app, "auth", lambda: __import__("api.auth", fromlist=["router"]).router)
+_include_router_safe(app, "weather", lambda: __import__("api.weather", fromlist=["router"]).router)
 
 
 @app.get("/")
