@@ -42,6 +42,10 @@ class TryOnUrlRequest(BaseModel):
     keepBackground: bool = True
     aspectRatio: str = "3:4"
     category: str = "auto"
+    # clothesImageUrls와 같은 순서의 개별 옷 카테고리(TOP/BOTTOM/OUTER/SET...).
+    # 상하의 동시 피팅 시 category=auto로 뭉개지는 문제를 해결 — 이미지별로
+    # 어느 부위를 교체할지 결정적 지침을 만들 수 있게 함. 구버전 앱은 안 보냄(빈 리스트).
+    clothesCategories: List[str] = []
     # 🔥 1. 안드로이드에서 보낸 마스터 프롬프트를 받는 필드 추가!
     prompt: str = ""
 
@@ -89,7 +93,7 @@ def _inline_part(img_bytes: bytes, mime: str) -> Dict[str, Any]:
 
 
 # 🔥 2. 파라미터에 user_prompt 추가 및 카테고리별 강력 방어 로직 적용
-def _tryon_prompt(view: str, keep_background: bool, category: str = "auto", user_prompt: str = "", num_garments: int = 1) -> str:
+def _tryon_prompt(view: str, keep_background: bool, category: str = "auto", user_prompt: str = "", num_garments: int = 1, clothes_categories: Optional[List[str]] = None) -> str:
     """Build the Gemini try-on prompt.
 
     Structure (LLMs weight trailing tokens most heavily):
@@ -128,8 +132,30 @@ def _tryon_prompt(view: str, keep_background: bool, category: str = "auto", user
         "- Lighting and shadows on the clothing match the lighting on the person.",
     ]
 
-    # --- 3. Garment replacement rules (category-specific) ------------
-    if cat_lower != "auto":
+    # --- 3. Garment replacement rules --------------------------------
+    # 옷별 카테고리를 알면 이미지 순서대로 결정적 매핑 (최우선).
+    cats = [c.strip().upper() for c in (clothes_categories or []) if c and c.strip()]
+    _region = {
+        "TOP": "the person's UPPER body — replace the top/shirt only",
+        "BOTTOM": "the person's LOWER body — replace the pants/shorts/skirt only",
+        "OUTER": "the person's OUTER layer — add/replace the jacket/coat only",
+        "SHOES": "the person's FEET — replace the footwear only",
+        "BAG": "the person as a carried bag accessory",
+        "ACC": "the person as an accessory (hat/belt/etc.)",
+        "SET": "the person's ENTIRE outfit — full-body one-piece/set",
+    }
+    if len(cats) >= 2 and len(cats) == num_garments:
+        parts += ["", "# GARMENT REPLACEMENT RULES (per reference image)"]
+        for i, c in enumerate(cats, start=1):
+            desc = _region.get(c, f"the region matching a '{c}'")
+            parts.append(f"- Clothing reference image #{i} is a {c}: put it on {desc}.")
+        parts.append(
+            "[CRITICAL] Apply EVERY listed garment — do NOT skip or omit any of "
+            "them. Each listed body region must be replaced by its assigned "
+            "reference garment. Keep each garment's actual length, silhouette, "
+            "fit, and material exactly as shown in its OWN reference image."
+        )
+    elif cat_lower != "auto":
         parts += [
             "",
             "# GARMENT REPLACEMENT RULES",
@@ -365,13 +391,14 @@ async def _call_gemini_image(*, model: str, parts: List[Dict[str, Any]], aspect_
 async def tryon_url(request: Request, req: TryOnUrlRequest) -> TryOnResponse:
     # 🔥 4. 로그에 prompt가 잘 넘어오는지 찍히도록 업데이트
     logger.info(
-        "[TRYON_URL] model=%s view=%s keepBg=%s category=%s prompt='%s' clothes=%d",
+        "[TRYON_URL] model=%s view=%s keepBg=%s category=%s clothesCategories=%s clothes=%d prompt='%s'",
         req.model,
         req.view,
         req.keepBackground,
         req.category,
-        req.prompt,
+        req.clothesCategories,
         len(req.clothesImageUrls),
+        req.prompt,
     )
 
     if req.model not in SUPPORTED_MODELS:
@@ -390,6 +417,7 @@ async def tryon_url(request: Request, req: TryOnUrlRequest) -> TryOnResponse:
         category=req.category,
         user_prompt=req.prompt,
         num_garments=len(clothes_urls),
+        clothes_categories=req.clothesCategories,
     )
 
     parts = [*clothes_parts, _inline_part(person_bytes, person_mime), {"text": prompt}]
