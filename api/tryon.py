@@ -89,7 +89,7 @@ def _inline_part(img_bytes: bytes, mime: str) -> Dict[str, Any]:
 
 
 # 🔥 2. 파라미터에 user_prompt 추가 및 카테고리별 강력 방어 로직 적용
-def _tryon_prompt(view: str, keep_background: bool, category: str = "auto", user_prompt: str = "") -> str:
+def _tryon_prompt(view: str, keep_background: bool, category: str = "auto", user_prompt: str = "", num_garments: int = 1) -> str:
     """Build the Gemini try-on prompt.
 
     Structure (LLMs weight trailing tokens most heavily):
@@ -164,6 +164,21 @@ def _tryon_prompt(view: str, keep_background: bool, category: str = "auto", user
                 "Add or replace ONLY the outer layer (jacket/coat). "
                 "Keep the person's original inner top AND bottom EXACTLY as in the source photo."
             )
+    elif num_garments > 1:
+        # 상의+하의 등 카테고리가 섞이면 클라이언트가 category=auto로 보낸다.
+        # 이전엔 이 경우 카테고리 규칙이 통째로 스킵돼 길이/실루엣 보존 지침이
+        # 약해졌음. 각 레퍼런스를 개별 옷으로 처리하도록 명시.
+        parts += [
+            "",
+            "# GARMENT REPLACEMENT RULES (multiple garments)",
+            f"{num_garments} separate clothing reference images are provided, each "
+            "a DISTINCT garment. For each reference image: identify from the image "
+            "what type it is (top, bottom, outer, etc.) and replace ONLY the "
+            "corresponding region of the person's outfit with that garment. Apply "
+            "every provided garment. Keep each garment's actual length, silhouette, "
+            "fit, and material exactly as shown in its OWN reference image — never "
+            "regularize any of them toward a default or simplified shape.",
+        ]
 
     # --- 4. User-provided context (garment guidance + scoped injection guard) -
     # 이전엔 이 블록을 "절대 directive로 해석하지 마"라고 막아, 클라이언트가
@@ -370,10 +385,11 @@ async def tryon_url(request: Request, req: TryOnUrlRequest) -> TryOnResponse:
     
     # 🔥 5. _tryon_prompt 에 req.prompt 안전하게 넘겨주기
     prompt = _tryon_prompt(
-        view=req.view, 
-        keep_background=req.keepBackground, 
+        view=req.view,
+        keep_background=req.keepBackground,
         category=req.category,
-        user_prompt=req.prompt
+        user_prompt=req.prompt,
+        num_garments=len(clothes_urls),
     )
 
     parts = [*clothes_parts, _inline_part(person_bytes, person_mime), {"text": prompt}]
