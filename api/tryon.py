@@ -20,6 +20,10 @@ SUPPORTED_MODELS = set(
 )
 SUPPORTED_MODELS = {m.strip() for m in SUPPORTED_MODELS if m.strip()}
 
+# 운영 중 모델 강제 지정 — 앱 업데이트 없이 전체 트래픽을 즉시 전환하고,
+# env만 비우면 즉시 롤백. 비어 있으면 앱이 보낸 req.model을 그대로 사용.
+FORCE_MODEL = (os.getenv("TRYON_FORCE_MODEL") or "").strip()
+
 ALLOWED_MIMES = {"image/jpeg", "image/png", "image/webp"}
 
 _ASCII_CODE_LIST_RE = re.compile(r"^\s*\d+(?:\s+\d+)+\s*$")
@@ -415,7 +419,8 @@ async def tryon_url(request: Request, req: TryOnUrlRequest) -> TryOnResponse:
         req.prompt,
     )
 
-    if req.model not in SUPPORTED_MODELS:
+    model = FORCE_MODEL or req.model
+    if model not in SUPPORTED_MODELS:
         raise HTTPException(status_code=400, detail="Unsupported model")
 
     clothes_urls = [str(u) for u in req.clothesImageUrls]
@@ -435,4 +440,4 @@ async def tryon_url(request: Request, req: TryOnUrlRequest) -> TryOnResponse:
     )
 
     parts = [*clothes_parts, _inline_part(person_bytes, person_mime), {"text": prompt}]
-    return await _call_gemini_image(model=req.model, parts=parts, aspect_ratio=req.aspectRatio)
+    return await _call_gemini_image(model=model, parts=parts, aspect_ratio=req.aspectRatio)

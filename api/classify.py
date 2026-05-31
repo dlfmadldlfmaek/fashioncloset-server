@@ -24,14 +24,15 @@ GEMINI_MODEL = os.getenv("CLASSIFY_MODEL", "gemini-2.5-flash")
 
 _ASCII_CODE_LIST_RE = re.compile(r"^[\d\s]+$")
 
-_CATEGORY_RULES = """- mainCategory: 반드시 TOP, BOTTOM, OUTER, SET, SHOES, BAG, ACC 중 하나
+_CATEGORY_RULES = """- mainCategory: TOP, BOTTOM, OUTER, SET, SHOES, BAG, ACC, NON_CLOTHING 중 하나
   - TOP: 티셔츠, 셔츠, 블라우스, 니트, 맨투맨, 후드, 폴로 등 상의
   - BOTTOM: 바지, 치마, 청바지, 레깅스 등 하의
   - OUTER: 자켓, 코트, 점퍼, 가디건 등 겉옷
   - SET: 원피스, 점프수트, 래시가드, 올인원, 드레스, 슈트세트 등 상하의 일체형
   - SHOES: 신발, 운동화, 슬리퍼 등
   - BAG: 가방, 백팩, 클러치 등
-  - ACC: 모자, 벨트, 시계, 안경, 목걸이 등 액세서리"""
+  - ACC: 모자, 벨트, 시계, 안경, 목걸이 등 액세서리
+  - NON_CLOTHING: 이미지에 옷·신발·가방·액세서리가 명확히 보이지 않거나 풍경·인물·음식·문서·로고만 보이는 경우. 애매하면 NON_CLOTHING으로. 이 경우 name은 "옷 사진이 아님"으로, tags는 빈 배열"""
 
 _NAME_RULES = """- name: 색상 + 소재/직물 + 넥라인/디테일 + 종류 조합 (한국어)
   - 소재를 정확히 구분: 와플(격자 울퉁불퉁), 골지(세로 골), 니트(편직), 면(평직), 저지(신축성 편직), 데님, 코듀로이(굵은 세로골) 등
@@ -71,6 +72,10 @@ CLASSIFY_BEST_PROMPT = f"""여러 옷 이미지를 비교 분석해서 JSON으�
 - JSON만 출력, 다른 텍스트 없이"""
 
 VALID_CATEGORIES = {"TOP", "BOTTOM", "OUTER", "SET", "SHOES", "BAG", "ACC"}
+
+# Gemini가 "옷이 아니다"라고 판정한 경우 그대로 보존하기 위한 확장 셋.
+# 이 안에 들어있으면 fallback("TOP")으로 바꾸지 않는다.
+ACCEPTED_CATEGORIES = VALID_CATEGORIES | {"NON_CLOTHING"}
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_BEST_IMAGES = 8
@@ -153,7 +158,7 @@ def _parse_gemini_response(text: str) -> ClassifyResponse:
         data = json_mod.loads(json_str)
         name = data.get("name", "이름 없음")
         category = data.get("mainCategory", "TOP")
-        main_category = category if category in VALID_CATEGORIES else "TOP"
+        main_category = category if category in ACCEPTED_CATEGORIES else "TOP"
         tags = [str(t) for t in data.get("tags", []) if t][:5]
         return ClassifyResponse(name=name, mainCategory=main_category, tags=tags)
     except (json_mod.JSONDecodeError, AttributeError) as exc:
@@ -166,7 +171,7 @@ def _parse_gemini_response(text: str) -> ClassifyResponse:
 
     name = name_match.group(1) if name_match else "이름 없음"
     category = cat_match.group(1) if cat_match else "TOP"
-    main_category = category if category in VALID_CATEGORIES else "TOP"
+    main_category = category if category in ACCEPTED_CATEGORIES else "TOP"
 
     tags: list[str] = []
     if tags_match:
@@ -210,7 +215,7 @@ def _parse_gemini_best_response(text: str, image_count: int) -> ClassifyBestResp
         if idx_match:
             best_index = int(idx_match.group(1))
 
-    main_category = category if category in VALID_CATEGORIES else "TOP"
+    main_category = category if category in ACCEPTED_CATEGORIES else "TOP"
     if image_count <= 0:
         best_index = 0
     else:
