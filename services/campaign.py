@@ -77,7 +77,10 @@ def _streak_risk(data: dict, today_start_ms: int, now_ms: int) -> Optional[Messa
 
 
 def _dormant(data: dict, today_start_ms: int, now_ms: int) -> Optional[Message]:
-    """7~60일 미접속 유저 복귀 유도. (광고성 성격 — 주간 발송 권장)"""
+    """7~60일 미접속 유저 복귀 유도. (광고성 — 마케팅 수신 동의자만, 주간 발송)"""
+    # 정보통신망법: 광고성 정보는 수신 동의자에게만.
+    if data.get("marketingConsent") is not True:
+        return None
     last_active = _ts_to_ms(data.get("fcmTokenUpdatedAt"))
     if last_active is None:
         return None
